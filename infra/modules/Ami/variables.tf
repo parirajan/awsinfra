@@ -1,55 +1,26 @@
-variable "name_prefix" {
-  type    = string
-  default = "ssm-ami"
+variable "base_name" {
+  description = "Base name for AMIs"
+  type        = string
 }
 
 variable "instance_type" {
-  type    = string
-  default = "t3.micro"
-}
-
-variable "vpc_id" {
+  description = "Instance type used to build NGINX AMI"
   type        = string
-  description = "VPC ID where builder SG is created."
+  default     = "t3.micro"
 }
 
 variable "subnet_id" {
+  description = "Subnet ID in the VPC where the build instance runs"
   type        = string
-  description = "Subnet ID where builder instance is launched."
 }
 
-variable "base_ami_id" {
-  type        = string
-  default     = null
-  description = "Optional base AMI override. If null, latest Amazon Linux 2023 x86_64 is used."
-}
-
-# Option A: Inline commands executed via SSM
-variable "ssm_commands" {
+variable "security_group_ids" {
+  description = "Security groups for the build instance"
   type        = list(string)
   default     = []
-  description = "Shell commands to execute via AWS-RunShellScript."
 }
 
-# Option B: Pull installer script from S3 and run it
-variable "s3_script_bucket" {
+variable "source_ami_id" {
+  description = "Base AMI to start from in us-east-1 (e.g., Amazon Linux)"
   type        = string
-  default     = null
-  description = "S3 bucket containing installer script (optional)."
-}
-
-variable "s3_script_key" {
-  type        = string
-  default     = null
-  description = "S3 key for installer script (optional)."
-}
-
-variable "tags" {
-  type    = map(string)
-  default = {}
-}
-
-variable "snapshot_without_reboot" {
-  type    = bool
-  default = true
 }
