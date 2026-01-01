@@ -1,26 +1,31 @@
 variable "base_name" {
-  description = "Base name for AMIs"
+  description = "Base name/prefix for the pipeline and AMIs"
   type        = string
 }
 
-variable "instance_type" {
-  description = "Instance type used to build NGINX AMI"
+variable "parent_image" {
+  description = "Base image ARN or AMI ID (e.g., Amazon Linux 2/2023) in us-east-1"
   type        = string
-  default     = "t3.micro"
 }
 
 variable "subnet_id" {
-  description = "Subnet ID in the VPC where the build instance runs"
+  description = "Subnet ID in the VPC where Image Builder will launch build instances (us-east-1)"
   type        = string
 }
 
 variable "security_group_ids" {
-  description = "Security groups for the build instance"
+  description = "Security groups to attach to the build instances"
   type        = list(string)
-  default     = []
 }
 
-variable "source_ami_id" {
-  description = "Base AMI to start from in us-east-1 (e.g., Amazon Linux)"
+variable "instance_type" {
+  description = "Instance type for the build environment"
   type        = string
+  default     = "t3.micro"
+}
+
+variable "tags" {
+  description = "Common tags to apply to Image Builder resources and AMIs"
+  type        = map(string)
+  default     = {}
 }
