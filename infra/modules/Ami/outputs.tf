@@ -1,9 +1,9 @@
-output "ami_id_east" {
-  value       = aws_ami_from_instance.nginx_ami_east.id
-  description = "NGINX AMI ID in us-east-1"
+output "image_arn" {
+  description = "ARN of the Image Builder image (latest build)"
+  value       = aws_imagebuilder_image.nginx_image.arn
 }
 
-output "ami_id_west" {
-  value       = aws_ami_copy.nginx_ami_west.id
-  description = "NGINX AMI ID in us-west-2"
+output "primary_region" {
+  description = "Region where the image was built"
+  value       = data.aws_region.current.name
 }
