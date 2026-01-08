@@ -1,3 +1,7 @@
+provider "aws" {
+  region = "us-east-1"
+}
+
 terraform {
   required_version = ">= 1.6.0"
   required_providers {
@@ -8,15 +12,14 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "mycompany-tf-state-prod"
-    key            = "image-builder/prod.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "terraform-locks-prod"
-    encrypt        = true
-    kms_key_id     = "alias/terraform-state-key-prod"
+    bucket = "pjtfstatebackend"
+    key    = "rtgs/image/terraform.tfstate"
+    region = "us-east-1"
+    encrypt = true
   }
 }
 
 provider "aws" {
   region = "us-east-1"
 }
+
