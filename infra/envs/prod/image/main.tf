@@ -32,6 +32,16 @@ data "terraform_remote_state" "s3_logs" {
   }
 }
 
+data "terraform_remote_state" "rtgs_iam" {
+  backend = "s3"
+  config = {
+    bucket = "pjtfstatebackend"
+    key    = "rtgs/iam/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+
 # IAM for Image Builder EC2 instances
 module "imagebuilder_iam" {
   source               = "../../../modules/imagebuilder_iam"
@@ -63,7 +73,7 @@ module "image_builder" {
   security_group_ids = [data.terraform_remote_state.rtgs_network.outputs.imagebuilder_sg_id]
 
   ssh_key_name          = null
-  instance_profile_name = module.imagebuilder_iam.instance_profile_name
+  instance_profile_name = data.terraform_remote_state.rtgs_iam.outputs.imagebuilder_instance_profile_name
 
   log_bucket_name       = data.terraform_remote_state.s3_logs.outputs.logs_bucket_name
   share_with_account_ids = var.share_with_account_ids
