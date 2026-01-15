@@ -1,17 +1,11 @@
 variable "role_name" {
+  description = "Name of the IAM role to create"
   type        = string
-  description = "Name of the EC2 IAM role for Image Builder instances."
 }
 
-variable "instance_profile_name" {
+variable "assume_role_policy_json" {
+  description = "JSON trust policy document for the role"
   type        = string
-  description = "Name of the EC2 instance profile for Image Builder."
-}
-
-variable "tags" {
-  type        = map(string)
-  description = "Tags to apply to IAM resources where supported."
-  default     = {}
 }
 
 variable "managed_policy_arns" {
@@ -26,3 +20,20 @@ variable "inline_policies" {
   default     = {}
 }
 
+variable "create_instance_profile" {
+  description = "Whether to create an instance profile for this role"
+  type        = bool
+  default     = true
+}
+
+variable "instance_profile_name" {
+  description = "Instance profile name (required if create_instance_profile = true)"
+  type        = string
+  default     = null
+}
+
+variable "tags" {
+  description = "Tags to apply to IAM resources"
+  type        = map(string)
+  default     = {}
+}
