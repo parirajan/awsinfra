@@ -13,3 +13,16 @@ variable "tags" {
   description = "Tags to apply to IAM resources where supported."
   default     = {}
 }
+
+variable "managed_policy_arns" {
+  description = "List of AWS or customer-managed policy ARNs to attach"
+  type        = list(string)
+  default     = []
+}
+
+variable "inline_policies" {
+  description = "Map of inline policy_name => JSON policy document"
+  type        = map(string)
+  default     = {}
+}
+
