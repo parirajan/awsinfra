@@ -1,32 +1,29 @@
-resource "aws_iam_role" "instance" {
-  name = var.role_name
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Principal = {
-        Service = "ec2.amazonaws.com"
-      }
-      Action = "sts:AssumeRole"
-    }]
-  })
-
-  tags = var.tags
+resource "aws_iam_role" "this" {
+  name               = var.role_name
+  assume_role_policy = var.assume_role_policy_json
+  tags               = var.tags
 }
 
-# AWS‑managed policies recommended for Image Builder EC2 instances
-resource "aws_iam_role_policy_attachment" "imagebuilder_core" {
-  role       = aws_iam_role.instance.name
-  policy_arn = "arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder"
-}
+resource "aws_iam_instance_profile" "this" {
+  count = var.create_instance_profile ? 1 : 0
 
-resource "aws_iam_role_policy_attachment" "ssm_core" {
-  role       = aws_iam_role.instance.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_instance_profile" "instance" {
   name = var.instance_profile_name
-  role = aws_iam_role.instance.name
+  role = aws_iam_role.this.name
+}
+
+# Attach AWS or customer-managed policies by ARN
+resource "aws_iam_role_policy_attachment" "managed" {
+  for_each = toset(var.managed_policy_arns)
+
+  role       = aws_iam_role.this.name
+  policy_arn = each.value
+}
+
+# Attach inline custom policies (JSON) to the same role
+resource "aws_iam_role_policy" "inline" {
+  for_each = var.inline_policies
+
+  name   = each.key
+  role   = aws_iam_role.this.id
+  policy = each.value
 }
