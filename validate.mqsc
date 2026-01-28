@@ -1,0 +1,108 @@
+* ==========================================================
+* VALIDATION SCRIPT - run on EACH QM:
+*   runmqsc SETTLE1 < validate_settle.mqsc
+*   runmqsc SETTLE2 < validate_settle.mqsc
+*   runmqsc SETTLE3 < validate_settle.mqsc
+* ==========================================================
+
+* ----------------------------------------------------------
+* 0) Uniform cluster must be OFF (standard cluster only)
+* ----------------------------------------------------------
+DISPLAY QMGR UNIFORMCLUSTER
+
+* ----------------------------------------------------------
+* 1) Full vs Partial repository role (DEFPRESP)
+*   Expect:
+*     SETTLE1: FULL
+*     SETTLE2: FULL
+*     SETTLE3: NO
+* ----------------------------------------------------------
+DISPLAY QMGR DEFPRESP
+
+* ----------------------------------------------------------
+* 2) Listener object exists and listener is running
+*   Expect: LISTENER.TCP.1414 exists and STATUS(RUNNING)
+* ----------------------------------------------------------
+DISPLAY LISTENER('LISTENER.TCP.1414') TRPTYPE PORT CONTROL
+DISPLAY LSSTATUS('LISTENER.TCP.1414') STATUS TRPTYPE PORT
+
+* ----------------------------------------------------------
+* 3) QM TLS key repository configured
+*   Expect: SSLKEYR points to /etc/certs/pki/qmgr/<QM>/qmgr.p12
+*           CERTLABL matches qmgr-cert-<QM>
+* ----------------------------------------------------------
+DISPLAY QMGR SSLKEYR CERTLABL
+
+* ----------------------------------------------------------
+* 4) SVRCONN channel exists with mTLS and cipherspec
+* ----------------------------------------------------------
+DISPLAY CHANNEL('DEV.APP.SVRCONN') CHLTYPE SSLCIPH SSLCAUTH TRPTYPE
+
+* ----------------------------------------------------------
+* 5) CHLAUTH enabled and SSLPEERMAP rules exist for SVRCONN
+*   Expect:
+*     CHLAUTH(ENABLED)
+*     Two SSLPEERMAP rules mapping to MCAUSERs:
+*       Producer DN -> BARTERBANK
+*       Consumer DN -> DISPENSEBANK
+* ----------------------------------------------------------
+DISPLAY QMGR CHLAUTH
+DISPLAY CHLAUTH('DEV.APP.SVRCONN') TYPE(SSLPEERMAP) SSLPEER USERSRC MCAUSER ACTION
+
+* ----------------------------------------------------------
+* 6) Cluster channels exist (receiver + senders)
+*   You should see a CLUSRCVR for this QM and CLUSSDR to peers
+* ----------------------------------------------------------
+DISPLAY CHANNEL('SETTLE.TO.*') CHLTYPE CLUSTER CONNAME SSLCIPH SSLCAUTH TRPTYPE
+
+* ----------------------------------------------------------
+* 7) Cluster channel runtime status (if started)
+*   If channels are not started yet, results may be empty
+* ----------------------------------------------------------
+DISPLAY CHSTATUS('SETTLE.TO.*') CHLTYPE STATUS SUBSTATE CONNAME
+
+* ----------------------------------------------------------
+* 8) Clustered local queues exist and are in cluster SETTLE
+* ----------------------------------------------------------
+DISPLAY QLOCAL('PAYMENT.REQUEST')  CLUSTER DEFBIND CLWLUSEQ
+DISPLAY QLOCAL('PAYMENT.RESPONSE') CLUSTER DEFBIND CLWLUSEQ
+
+* ----------------------------------------------------------
+* 9) Dead-letter queue exists and QMGR points to it
+* ----------------------------------------------------------
+DISPLAY QLOCAL('PAYMENT.DLQ')
+DISPLAY QMGR DEADQ
+
+* ----------------------------------------------------------
+* 10) Cluster workload defaults (QMGR settings)
+* ----------------------------------------------------------
+DISPLAY QMGR CLWLMRUC CLWLUSEQ
+
+* ----------------------------------------------------------
+* 11) OAM authorization entries exist for principals
+* ----------------------------------------------------------
+DISPLAY AUTHREC PROFILE('SETTLE*') OBJTYPE(QMGR) PRINCIPAL('BARTERBANK') AUTHADD
+DISPLAY AUTHREC PROFILE('SETTLE*') OBJTYPE(QMGR) PRINCIPAL('DISPENSEBANK') AUTHADD
+
+DISPLAY AUTHREC PROFILE('PAYMENT.REQUEST')  OBJTYPE(QUEUE) PRINCIPAL('BARTERBANK') AUTHADD
+DISPLAY AUTHREC PROFILE('PAYMENT.RESPONSE') OBJTYPE(QUEUE) PRINCIPAL('BARTERBANK') AUTHADD
+DISPLAY AUTHREC PROFILE('PAYMENT.REQUEST')  OBJTYPE(QUEUE) PRINCIPAL('DISPENSEBANK') AUTHADD
+DISPLAY AUTHREC PROFILE('PAYMENT.RESPONSE') OBJTYPE(QUEUE) PRINCIPAL('DISPENSEBANK') AUTHADD
+
+* ----------------------------------------------------------
+* 12) Cluster-wide validation (requires cluster connectivity)
+*   These commands show what the cluster currently knows.
+*   If connectivity is not established yet, outputs may be empty.
+* ----------------------------------------------------------
+
+* 12a) Which queue managers are visible in cluster SETTLE
+DISPLAY CLUSQMGR(*) CLUSTER QMNAME QMTYPE DEFPRESP CONNAME
+
+* 12b) Which instances of the clustered queues are advertised
+DISPLAY CLUSQ('PAYMENT.REQUEST')  CLUSTER QMNAME QTYPE DEFBIND CLWLUSEQ
+DISPLAY CLUSQ('PAYMENT.RESPONSE') CLUSTER QMNAME QTYPE DEFBIND CLWLUSEQ
+
+* 12c) Show the cluster channels known to this QM
+DISPLAY CLUSCHL(*) CLUSTER CHLTYPE CONNAME
+
+* ---- End ----
