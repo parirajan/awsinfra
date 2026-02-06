@@ -2,42 +2,70 @@ package pvt.aotibank.payments.producer;
 
 import com.ibm.mq.jms.MQConnectionFactory;
 import com.ibm.msg.client.wmq.WMQConstants;
-import javax.jms.*;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import jakarta.annotation.PostConstruct;
-import java.util.concurrent.atomic.AtomicInteger; // [1] Import for Counter - PJ
+
+import javax.jms.*;
+import java.io.FileInputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
+import java.security.PrivateKey;
+import java.security.Signature;
+import java.util.Base64;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 public class MqSender {
 
-    // [2] SHARED GLOBAL COUNTER - PJ
-    // Defined here so all threads (mq1, mq2, mq3) share it.
     private final AtomicInteger globalSequence = new AtomicInteger(0);
+    
+    // Loaded at startup for signing
+    private PrivateKey privateKey; 
 
     @Value("${ibm.mq.queue-manager}") private String qmgr;
     @Value("${ibm.mq.channel}") private String channel;
-    @Value("${ibm.mq.conn-name}") private String connNames; 
+    @Value("${ibm.mq.conn-name}") private String connNames;
     @Value("${ibm.mq.request-queue}") private String queueName;
     @Value("${ibm.mq.interval-ms:2000}") private long intervalMs;
     @Value("${ibm.mq.sslCipherSuite:TLS_AES_256_GCM_SHA384}") private String sslCipherSuite;
 
-    @Value("${ibm.mq.ssl.keyStore}") private String keyStore;
+    // SSL & Key Config
+    @Value("${ibm.mq.ssl.keyStore}") private String keyStorePath;
     @Value("${ibm.mq.ssl.keyStorePassword}") private String keyStorePassword;
-    @Value("${ibm.mq.ssl.trustStore}") private String trustStore;
+    @Value("${ibm.mq.ssl.trustStore}") private String trustStorePath;
     @Value("${ibm.mq.ssl.trustStorePassword}") private String trustStorePassword;
+    
+    // The alias of YOUR certificate in the keystore (e.g., "mq-client" or "default")
+    @Value("${ibm.mq.ssl.cert-alias:mq-client}") private String certAlias;
 
     @PostConstruct
-    public void applySslProps() {
-        System.setProperty("javax.net.ssl.keyStore", keyStore);
+    public void init() {
+        // 1. Apply System Properties for mTLS
+        System.setProperty("javax.net.ssl.keyStore", keyStorePath);
         System.setProperty("javax.net.ssl.keyStorePassword", keyStorePassword);
         System.setProperty("javax.net.ssl.keyStoreType", "PKCS12");
-        System.setProperty("javax.net.ssl.trustStore", trustStore);
+        System.setProperty("javax.net.ssl.trustStore", trustStorePath);
         System.setProperty("javax.net.ssl.trustStorePassword", trustStorePassword);
         System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
-
         System.setProperty("com.ibm.mq.cfg.useIBMCipherMappings", "false");
         System.setProperty("com.ibm.ssl.performURLHostNameVerification", "false");
+
+        // 2. Load Private Key for Signing
+        try {
+            KeyStore ks = KeyStore.getInstance("PKCS12");
+            try (FileInputStream fis = new FileInputStream(keyStorePath)) {
+                ks.load(fis, keyStorePassword.toCharArray());
+            }
+            this.privateKey = (PrivateKey) ks.getKey(certAlias, keyStorePassword.toCharArray());
+            if (this.privateKey == null) {
+                System.err.println("[SECURITY ERROR] Could not find Private Key with alias: " + certAlias);
+            } else {
+                System.out.println("[SECURITY] Private Key loaded successfully for signing.");
+            }
+        } catch (Exception e) {
+            System.err.println("[SECURITY CRITICAL] Failed to load signing key: " + e.getMessage());
+        }
     }
 
     public void startAsync() {
@@ -45,26 +73,20 @@ public class MqSender {
         for (String node : nodes) {
             final String targetNode = node.trim();
             if (targetNode.isEmpty()) continue;
-
             System.out.println("[INIT] Spawning producer thread for: " + targetNode);
-            
-            // Start the thread passing the specific node address
             new Thread(() -> runLoop(targetNode), "mq-producer-" + targetNode).start();
         }
     }
 
     private void runLoop(String nodeAddress) {
         int attempt = 0;
-        
-        // [3] NOTE: 'int i = 0' REMOVED from here to stop local counting - PJ
-        
         while (true) {
             try {
                 MQConnectionFactory f = new MQConnectionFactory();
                 f.setTransportType(WMQConstants.WMQ_CM_CLIENT);
                 f.setQueueManager(qmgr);
                 f.setChannel(channel);
-                f.setConnectionNameList(nodeAddress); // Connect only to this thread's node
+                f.setConnectionNameList(nodeAddress);
                 f.setSSLCipherSuite(sslCipherSuite);
                 f.setBooleanProperty(WMQConstants.USER_AUTHENTICATION_MQCSP, false);
 
@@ -75,16 +97,21 @@ public class MqSender {
                     MessageProducer p = s.createProducer(q);
 
                     System.out.println("[PRODUCER] Connected to node: " + nodeAddress);
-                    attempt = 0; 
+                    attempt = 0;
 
                     while (true) {
-                        // [4] Generate unique ID from the shared counter
                         int currentId = globalSequence.incrementAndGet();
-                        
                         String payload = "PAYMENT-" + currentId + " via " + nodeAddress;
-                        p.send(s.createTextMessage(payload));
+
+                        // --- SIGNING STEP ---
+                        String signature = generateSignature(payload);
                         
-                        System.out.println("[PRODUCER] Sent: " + payload);
+                        TextMessage msg = s.createTextMessage(payload);
+                        // Attach signature as a custom header property
+                        msg.setStringProperty("X-Message-Signature", signature);
+
+                        p.send(msg);
+                        System.out.println("[PRODUCER] Sent Signed Message: " + payload);
                         Thread.sleep(intervalMs);
                     }
                 }
@@ -95,5 +122,13 @@ public class MqSender {
                 try { Thread.sleep(backoff); } catch (InterruptedException ignored) {}
             }
         }
+    }
+
+    // Helper: Generate SHA256withRSA Signature
+    private String generateSignature(String data) throws Exception {
+        Signature sig = Signature.getInstance("SHA256withRSA");
+        sig.initSign(privateKey);
+        sig.update(data.getBytes(StandardCharsets.UTF_8));
+        return Base64.getEncoder().encodeToString(sig.sign());
     }
 }
