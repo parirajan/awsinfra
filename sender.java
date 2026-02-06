@@ -6,13 +6,17 @@ import javax.jms.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import jakarta.annotation.PostConstruct;
+import java.util.concurrent.atomic.AtomicInteger; // [1] Import this
 
 @Component
 public class MqSender {
 
+    // [2] SHARED GLOBAL COUNTER
+    // Defined here so all threads (mq1, mq2, mq3) share it.
+    private final AtomicInteger globalSequence = new AtomicInteger(0);
+
     @Value("${ibm.mq.queue-manager}") private String qmgr;
     @Value("${ibm.mq.channel}") private String channel;
-    // Expects "mq1(1414),mq2(1414),mq3(1414)"
     @Value("${ibm.mq.conn-name}") private String connNames; 
     @Value("${ibm.mq.request-queue}") private String queueName;
     @Value("${ibm.mq.interval-ms:2000}") private long intervalMs;
@@ -32,41 +36,35 @@ public class MqSender {
         System.setProperty("javax.net.ssl.trustStorePassword", trustStorePassword);
         System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
 
-        // CRITICAL: Disable hostname check so we can connect via IP/LB
         System.setProperty("com.ibm.mq.cfg.useIBMCipherMappings", "false");
         System.setProperty("com.ibm.ssl.performURLHostNameVerification", "false");
     }
 
     public void startAsync() {
-        // 1. Split the string into individual nodes
         String[] nodes = connNames.split(",");
-        
         for (String node : nodes) {
             final String targetNode = node.trim();
             if (targetNode.isEmpty()) continue;
 
             System.out.println("[INIT] Spawning producer thread for: " + targetNode);
             
-            // 2. Start a unique thread for this specific node
+            // Start the thread passing the specific node address
             new Thread(() -> runLoop(targetNode), "mq-producer-" + targetNode).start();
         }
     }
 
-    // 3. Method now takes 'nodeAddress' as a parameter
     private void runLoop(String nodeAddress) {
-        int i = 0;
         int attempt = 0;
+        
+        // [3] NOTE: 'int i = 0' REMOVED from here to stop local counting
+        
         while (true) {
             try {
                 MQConnectionFactory f = new MQConnectionFactory();
                 f.setTransportType(WMQConstants.WMQ_CM_CLIENT);
                 f.setQueueManager(qmgr);
                 f.setChannel(channel);
-                
-                // 4. Connect ONLY to the specific node for this thread
-                f.setConnectionNameList(nodeAddress);
-
-                // mTLS Setup
+                f.setConnectionNameList(nodeAddress); // Connect only to this thread's node
                 f.setSSLCipherSuite(sslCipherSuite);
                 f.setBooleanProperty(WMQConstants.USER_AUTHENTICATION_MQCSP, false);
 
@@ -80,8 +78,12 @@ public class MqSender {
                     attempt = 0; 
 
                     while (true) {
-                        String payload = "PAYMENT-" + (++i) + " via " + nodeAddress;
+                        // [4] Generate unique ID from the shared counter
+                        int currentId = globalSequence.incrementAndGet();
+                        
+                        String payload = "PAYMENT-" + currentId + " via " + nodeAddress;
                         p.send(s.createTextMessage(payload));
+                        
                         System.out.println("[PRODUCER] Sent: " + payload);
                         Thread.sleep(intervalMs);
                     }
