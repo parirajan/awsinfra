@@ -6,12 +6,12 @@ import javax.jms.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import jakarta.annotation.PostConstruct;
-import java.util.concurrent.atomic.AtomicInteger; // [1] Import this
+import java.util.concurrent.atomic.AtomicInteger; // [1] Import for Counter - PJ
 
 @Component
 public class MqSender {
 
-    // [2] SHARED GLOBAL COUNTER
+    // [2] SHARED GLOBAL COUNTER - PJ
     // Defined here so all threads (mq1, mq2, mq3) share it.
     private final AtomicInteger globalSequence = new AtomicInteger(0);
 
