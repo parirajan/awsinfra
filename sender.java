@@ -56,7 +56,7 @@ public class MqSender {
     private void runLoop(String nodeAddress) {
         int attempt = 0;
         
-        // [3] NOTE: 'int i = 0' REMOVED from here to stop local counting
+        // [3] NOTE: 'int i = 0' REMOVED from here to stop local counting - PJ
         
         while (true) {
             try {
