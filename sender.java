@@ -12,7 +12,8 @@ public class MqSender {
 
     @Value("${ibm.mq.queue-manager}") private String qmgr;
     @Value("${ibm.mq.channel}") private String channel;
-    @Value("${ibm.mq.conn-name}") private String connNames; // Expects "mq1(1414),mq2(1414),mq3(1414)"
+    // Expects "mq1(1414),mq2(1414),mq3(1414)"
+    @Value("${ibm.mq.conn-name}") private String connNames; 
     @Value("${ibm.mq.request-queue}") private String queueName;
     @Value("${ibm.mq.interval-ms:2000}") private long intervalMs;
     @Value("${ibm.mq.sslCipherSuite:TLS_AES_256_GCM_SHA384}") private String sslCipherSuite;
@@ -31,33 +32,39 @@ public class MqSender {
         System.setProperty("javax.net.ssl.trustStorePassword", trustStorePassword);
         System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
 
-        // Required to bypass hostname verification for mTLS via LB/IP
+        // CRITICAL: Disable hostname check so we can connect via IP/LB
         System.setProperty("com.ibm.mq.cfg.useIBMCipherMappings", "false");
         System.setProperty("com.ibm.ssl.performURLHostNameVerification", "false");
     }
 
     public void startAsync() {
-        // Parse the comma-separated list into individual nodes
+        // 1. Split the string into individual nodes
         String[] nodes = connNames.split(",");
+        
         for (String node : nodes) {
-            String targetNode = node.trim();
-            System.out.println("Starting dedicated producer thread for node: " + targetNode);
+            final String targetNode = node.trim();
+            if (targetNode.isEmpty()) continue;
+
+            System.out.println("[INIT] Spawning producer thread for: " + targetNode);
             
-            // Spawn a unique thread for each QM to ensure parallel delivery
+            // 2. Start a unique thread for this specific node
             new Thread(() -> runLoop(targetNode), "mq-producer-" + targetNode).start();
         }
     }
 
+    // 3. Method now takes 'nodeAddress' as a parameter
     private void runLoop(String nodeAddress) {
-        int attempt = 0;
         int i = 0;
+        int attempt = 0;
         while (true) {
             try {
                 MQConnectionFactory f = new MQConnectionFactory();
                 f.setTransportType(WMQConstants.WMQ_CM_CLIENT);
                 f.setQueueManager(qmgr);
-                f.setConnectionNameList(nodeAddress); // Target one specific node
                 f.setChannel(channel);
+                
+                // 4. Connect ONLY to the specific node for this thread
+                f.setConnectionNameList(nodeAddress);
 
                 // mTLS Setup
                 f.setSSLCipherSuite(sslCipherSuite);
@@ -70,19 +77,19 @@ public class MqSender {
                     MessageProducer p = s.createProducer(q);
 
                     System.out.println("[PRODUCER] Connected to node: " + nodeAddress);
-                    attempt = 0; // Reset backoff on success
+                    attempt = 0; 
 
                     while (true) {
-                        TextMessage m = s.createTextMessage("PAYMENT-" + (++i) + " via " + nodeAddress);
-                        p.send(m);
-                        System.out.println("[PRODUCER] Sent: " + m.getText());
+                        String payload = "PAYMENT-" + (++i) + " via " + nodeAddress;
+                        p.send(s.createTextMessage(payload));
+                        System.out.println("[PRODUCER] Sent: " + payload);
                         Thread.sleep(intervalMs);
                     }
                 }
             } catch (Exception e) {
                 attempt++;
                 long backoff = Math.min(30000, 1000L * attempt);
-                System.err.println("[PRODUCER Error] Node " + nodeAddress + " failed: " + e.getMessage());
+                System.err.println("[PRODUCER Error] " + nodeAddress + " failed: " + e.getMessage());
                 try { Thread.sleep(backoff); } catch (InterruptedException ignored) {}
             }
         }
