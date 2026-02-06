@@ -12,7 +12,7 @@ public class MqListener {
 
     @Value("${ibm.mq.queue-manager}") private String qmgr;
     @Value("${ibm.mq.channel}") private String channel;
-    @Value("${ibm.mq.conn-name}") private String connNames; // Reads the comma list
+    @Value("${ibm.mq.conn-name}") private String connNames; // Reads "mq1(1414),mq2(1414),mq3(1414)"
     @Value("${ibm.mq.request-queue}") private String queueName;
     @Value("${ibm.mq.interval-ms:2000}") private long intervalMs;
     @Value("${ibm.mq.sslCipherSuite}") private String sslCipherSuite;
@@ -24,6 +24,7 @@ public class MqListener {
 
     @PostConstruct
     public void applySslProps() {
+        // Core mTLS Keystore/Truststore setup
         System.setProperty("javax.net.ssl.keyStore", keyStore);
         System.setProperty("javax.net.ssl.keyStorePassword", keyStorePassword);
         System.setProperty("javax.net.ssl.keyStoreType", "PKCS12");
@@ -31,18 +32,25 @@ public class MqListener {
         System.setProperty("javax.net.ssl.trustStorePassword", trustStorePassword);
         System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
 
-        // Required to bypass hostname verification and use standard JSSE
+        // Disables hostname check to allow connection via LB/IP
         System.setProperty("com.ibm.mq.cfg.useIBMCipherMappings", "false");
         System.setProperty("com.ibm.ssl.performURLHostNameVerification", "false");
+        
+        System.out.println("[MQ SSL] Properties applied. Multi-node mTLS ready.");
     }
 
     public void startAsync() {
-        // Split the connection list into individual nodes
+        // 1. Split the comma-separated list of nodes from your YAML
         String[] nodes = connNames.split(",");
+        
         for (String node : nodes) {
-            String targetNode = node.trim();
-            System.out.println("Starting dedicated thread for node: " + targetNode);
-            new Thread(() -> runLoop(targetNode), "mq-consumer-" + targetNode).start();
+            final String targetNode = node.trim();
+            System.out.println("Starting dedicated listener thread for node: " + targetNode);
+            
+            // 2. Start a UNIQUE thread for EACH node to ensure simultaneous consumption
+            Thread t = new Thread(() -> runLoop(targetNode), "mq-consumer-" + targetNode);
+            t.setDaemon(false);
+            t.start();
         }
     }
 
@@ -50,14 +58,16 @@ public class MqListener {
         int attempt = 0;
         while (true) {
             try {
+                // 3. Create a dedicated factory for this specific node
                 MQConnectionFactory f = new MQConnectionFactory();
                 f.setTransportType(WMQConstants.WMQ_CM_CLIENT);
                 f.setQueueManager(qmgr);
-                f.setConnectionNameList(nodeAddress); // Connect to only ONE specific node
+                f.setConnectionNameList(nodeAddress); 
                 f.setChannel(channel);
 
-                // mTLS Setup
+                // --- TLS / mTLS setup ---
                 f.setSSLCipherSuite(sslCipherSuite);
+                // Disable MQCSP to rely strictly on certificate DN for authn
                 f.setBooleanProperty(WMQConstants.USER_AUTHENTICATION_MQCSP, false);
 
                 try (Connection c = f.createConnection()) {
@@ -67,20 +77,25 @@ public class MqListener {
                     MessageConsumer consumer = s.createConsumer(q);
 
                     System.out.println("[CONSUMER] Connected to node: " + nodeAddress);
-                    attempt = 0; // Reset attempts on successful connection
+                    attempt = 0; // Reset backoff on success
 
                     while (true) {
                         Message m = consumer.receive(intervalMs);
+                        if (m == null) continue;
+
                         if (m instanceof TextMessage tm) {
                             System.out.println("[CONSUMER] Received from " + nodeAddress + ": " + tm.getText());
+                        } else {
+                            System.out.println("[CONSUMER] Non-text message received from " + nodeAddress);
                         }
                     }
                 }
             } catch (Exception e) {
                 attempt++;
-                long backoff = Math.min(30000, 1000L * attempt);
-                System.err.println("[CONSUMER Error] Node " + nodeAddress + " failed: " + e.getMessage());
-                try { Thread.sleep(backoff); } catch (InterruptedException ignored) {}
+                // Exponential backoff to prevent flooding during node outages
+                long backoffMs = Math.min(30000, 1000L * attempt);
+                System.err.println("[CONSUMER Error] Node " + nodeAddress + " failed. Retrying in " + backoffMs + "ms: " + e.getMessage());
+                try { Thread.sleep(backoffMs); } catch (InterruptedException ignored) {}
             }
         }
     }
