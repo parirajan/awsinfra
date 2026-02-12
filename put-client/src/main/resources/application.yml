@@ -1,0 +1,11 @@
+client:
+  ssl:
+    key-store: classpath:client-keystore.p12
+    key-store-password: password
+    # The alias of the private key inside the keystore used for signing
+    key-alias: put-client
+    trust-store: classpath:truststore.p12
+    trust-store-password: password
+    
+ingress:
+  url: https://localhost:8443/v1/payments/ingress
