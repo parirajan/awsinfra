@@ -1,0 +1,9 @@
+client:
+  ssl:
+    key-store: classpath:client-keystore.p12
+    key-store-password: password
+    trust-store: classpath:truststore.p12
+    trust-store-password: password
+    
+egress:
+  url: https://localhost:8444/v1/payments/egress-stream
