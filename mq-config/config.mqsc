@@ -1,0 +1,9 @@
+* Define the Channel for clients
+DEFINE CHANNEL('DEV.APP.SVRCONN') CHLTYPE(SVRCONN) TRPTYPE(TCP) REPLACE
+
+* Disable strict authentication for this Dev environment
+SET CHLAUTH('DEV.APP.SVRCONN') TYPE(BLOCKUSER) USERLIST('nobody')
+ALTER QMGR CHLAUTH(DISABLED)
+
+* Create the Queue needed for your app
+DEFINE QLOCAL('PAYMENT.QUEUE.IN') REPLACE
