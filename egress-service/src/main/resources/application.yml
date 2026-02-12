@@ -1,0 +1,18 @@
+server:
+  port: 8444
+  ssl:
+    enabled: true
+    client-auth: need
+    key-store: classpath:certs/server-keystore.p12
+    key-store-password: changeit
+    trust-store: classpath:certs/truststore.p12
+    trust-store-password: changeit
+
+ibm:
+  mq:
+    queue-manager: QM1
+    channel: DEV.APP.SVRCONN
+    conn-name: localhost(1414)
+    user: admin
+    password: password
+    queue: DEV.QUEUE.1
