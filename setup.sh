@@ -3,58 +3,51 @@
 # ==========================================
 # 0. PREPARE WORKSPACE
 # ==========================================
-ROOT_DIR="distributed-system"
+ROOT_DIR="distributed-system-complete"
 rm -rf $ROOT_DIR
 mkdir -p $ROOT_DIR
 cd $ROOT_DIR
 
 # ==========================================
-# 1. CERTIFICATE GENERATION (The "Right Names")
+# 1. CERTIFICATE GENERATION (The "Golden Config")
 # ==========================================
-echo ">>> 1. Generating Production Certificates..."
+echo ">>> 1. Generating Certificates with NLB Support..."
 mkdir -p certs
 cd certs
 
 # 1.1 Root CA
 openssl req -x509 -sha256 -days 3650 -newkey rsa:4096 -keyout ca.key -out ca.crt -nodes -subj "/CN=AotiBankRootCA"
 
-# 1.2 Helper Function for Certs
+# 1.2 Helper Function
 gen_cert() {
     NAME=$1
     ALIAS=$2
-    # Create Key & CSR
     openssl req -new -newkey rsa:4096 -keyout $NAME.key -out $NAME.csr -nodes -subj "/CN=$NAME"
     
-    # --- CRITICAL FIX: ADD 'payments.aotibank.pvt' TO SAN ---
-    # This tells Java: "It is valid if I am accessed via payments.aotibank.pvt"
+    # CRITICAL FIX: Add 'payments.aotibank.pvt' to SAN
+    # This allows the cert to be valid for both the specific machine name AND the NLB name
     openssl x509 -req -CA ca.crt -CAkey ca.key -in $NAME.csr -out $NAME.crt -days 365 -CAcreateserial \
     -extensions SAN -extfile <(printf "[SAN]\nsubjectAltName=DNS:$NAME,DNS:localhost,DNS:payments.aotibank.pvt")
     
-    # Export to PKCS12
     openssl pkcs12 -export -out $NAME.p12 -inkey $NAME.key -in $NAME.crt -certfile ca.crt -passout pass:changeit -name $ALIAS
 }
-
 
 # 1.3 Generate Identities
 gen_cert "ingress.payments.aotibank.pvt" "server"
 gen_cert "egress.payments.aotibank.pvt" "server"
-gen_cert "barterbank.payments.aotibank.pvt" "client"  # PUT CLIENT
-gen_cert "dispense.payments.aotibank.pvt" "client"    # GET CLIENT
+gen_cert "barterbank.payments.aotibank.pvt" "client"
+gen_cert "dispense.payments.aotibank.pvt" "client"
 
-# 1.4 BUILD TRUSTSTORE (Crucial Step for Signing)
-echo ">>> Updating Truststore with CA and Signing Keys..."
-
-# Import CA (For TLS Trust)
+# 1.4 Truststore
+echo ">>> Creating Truststore..."
 keytool -import -trustcacerts -noprompt -alias ca -file ca.crt -keystore truststore.p12 -storepass changeit -storetype PKCS12
-
-# Import BarterBank Public Key (For Message Signature Verification)
-# The Ingress service will use this to verify the digital signature in the payload
+# Import Put Client Public Key for Signature Verification
 keytool -import -noprompt -alias client-public -file barterbank.payments.aotibank.pvt.crt -keystore truststore.p12 -storepass changeit -storetype PKCS12
 
 cd ..
 
 # ==========================================
-# 2. INGRESS SERVICE (Signature Verification)
+# 2. INGRESS SERVICE (Node A)
 # ==========================================
 echo ">>> 2. Creating Ingress Service..."
 mkdir -p ingress-service/src/main/java/pvt/aotibank/ingress/{config,controller,model,service}
@@ -93,7 +86,7 @@ ibm:
     queue: PAYMENT.QUEUE.IN
 EOF
 
-# Security Config (Extracts CN)
+# Security Config (Allows 'barterbank')
 cat << 'EOF' > ingress-service/src/main/java/pvt/aotibank/ingress/config/SecurityConfig.java
 package pvt.aotibank.ingress.config;
 import org.springframework.context.annotation.Bean;
@@ -127,7 +120,7 @@ public class SecurityConfig {
 }
 EOF
 
-# Signature Service (Uses 'client-public' from Truststore)
+# Signature Service
 cat << 'EOF' > ingress-service/src/main/java/pvt/aotibank/ingress/service/SignatureService.java
 package pvt.aotibank.ingress.service;
 import org.springframework.beans.factory.annotation.Value;
@@ -141,18 +134,13 @@ import java.util.Base64;
 @Service
 public class SignatureService {
     private final PublicKey clientPublicKey;
-
     public SignatureService(@Value("${server.ssl.trust-store}") Resource trustStore,
                             @Value("${server.ssl.trust-store-password}") String password) throws Exception {
         KeyStore ks = KeyStore.getInstance("PKCS12");
         try (InputStream is = trustStore.getInputStream()) { ks.load(is, password.toCharArray()); }
-        
-        // LOAD THE PUBLIC KEY ADDED IN STEP 1.4
         Certificate cert = ks.getCertificate("client-public");
-        if (cert == null) throw new RuntimeException("Public key 'client-public' not found in truststore!");
         this.clientPublicKey = cert.getPublicKey();
     }
-
     public boolean verify(String data, String signature) {
         try {
             Signature sig = Signature.getInstance("SHA256withRSA");
@@ -188,12 +176,9 @@ public class IngressController {
     @PostMapping("/ingress")
     public ResponseEntity<String> accept(@RequestBody SecurePayload payload) {
         System.out.println(">>> Received Payment: " + payload.messageId());
-        
         if (!signatureService.verify(payload.data(), payload.signature())) {
-            System.err.println(">>> FATAL: Signature Verification Failed for " + payload.messageId());
             return ResponseEntity.status(401).body("Invalid Signature");
         }
-        
         try {
             String jsonMessage = objectMapper.writeValueAsString(payload);
             jmsTemplate.convertAndSend(queueName, jsonMessage);
@@ -216,13 +201,13 @@ public class IngressApplication {
 EOF
 
 # ==========================================
-# 3. EGRESS SERVICE
+# 3. EGRESS SERVICE (Node B)
 # ==========================================
 echo ">>> 3. Creating Egress Service..."
-mkdir -p egress-service/src/main/java/pvt/aotibank/egress/controller
+mkdir -p egress-service/src/main/java/pvt/aotibank/egress/{config,controller}
 mkdir -p egress-service/src/main/resources
 
-# POM (Clone Ingress)
+# POM
 cp ingress-service/pom.xml egress-service/pom.xml
 sed -i 's/ingress-service/egress-service/' egress-service/pom.xml
 
@@ -244,6 +229,41 @@ ibm:
     conn-name: ibm-mq-server(1414)
     user: mqm
     queue: PAYMENT.QUEUE.IN
+EOF
+
+# Security Config (Allows 'dispense' - CRITICAL FIX)
+cat << 'EOF' > egress-service/src/main/java/pvt/aotibank/egress/config/SecurityConfig.java
+package pvt.aotibank.egress.config;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.core.authority.AuthorityUtils;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http.csrf(AbstractHttpConfigurer::disable)
+            .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+            .x509(x509 -> x509.subjectPrincipalRegex("CN=(.*?)(?:,|$)"));
+        return http.build();
+    }
+    @Bean
+    public UserDetailsService userDetailsService() {
+        return username -> {
+            // FIX: Allow 'dispense' to connect
+            if (username.contains("dispense") || username.equals("client")) {
+                return new User(username, "", AuthorityUtils.commaSeparatedStringToAuthorityList("ROLE_USER"));
+            }
+            throw new UsernameNotFoundException("User not found: " + username);
+        };
+    }
+}
 EOF
 
 # Controller
@@ -294,7 +314,7 @@ public class EgressApplication {
 EOF
 
 # ==========================================
-# 4. PUT CLIENT (Message Signing + Custom NLB Verifier)
+# 4. PUT CLIENT (Node C)
 # ==========================================
 echo ">>> 4. Creating Put Client..."
 mkdir -p put-client/src/main/java/pvt/aotibank/client/put/{config,service}
@@ -322,34 +342,10 @@ client:
     trust-store-password: changeit
     key-alias: client
 ingress:
-  # The NLB DNS name (Mapped in /etc/hosts)
   url: https://payments.aotibank.pvt:8443/v1/payments/ingress
 EOF
 
-# Signer (Uses Private Key)
-cat << 'EOF' > put-client/src/main/java/pvt/aotibank/client/put/service/PayloadSigner.java
-package pvt.aotibank.client.put.service;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import java.security.*;
-import java.util.Base64;
-@Service
-public class PayloadSigner {
-    private final PrivateKey privateKey;
-    public PayloadSigner(KeyStore signingKeyStore, 
-                         @Value("${client.ssl.key-alias}") String alias) throws Exception {
-        this.privateKey = (PrivateKey) signingKeyStore.getKey(alias, "changeit".toCharArray());
-    }
-    public String sign(String data) throws Exception {
-        Signature rsa = Signature.getInstance("SHA256withRSA");
-        rsa.initSign(privateKey);
-        rsa.update(data.getBytes());
-        return Base64.getEncoder().encodeToString(rsa.sign());
-    }
-}
-EOF
-
-# Custom Hostname Verifier (The NLB Fix)
+# RestConfig (Standard mTLS, trusts 'payments' due to SAN)
 cat << 'EOF' > put-client/src/main/java/pvt/aotibank/client/put/config/RestClientConfig.java
 package pvt.aotibank.client.put.config;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -364,7 +360,6 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.HostnameVerifier;
 import java.io.InputStream;
 import java.security.KeyStore;
 
@@ -387,20 +382,9 @@ public class RestClientConfig {
                 .loadTrustMaterial(trustKeyStore, null)
                 .build();
 
-        // NLB FIX: We call 'payments.aotibank.pvt', but server presents 'ingress.payments.aotibank.pvt'
-        HostnameVerifier ingressVerifier = (hostname, session) -> {
-            try {
-                String principal = session.getPeerPrincipal().getName();
-                // Allow if certificate is 'ingress...'
-                return principal.contains("ingress.payments.aotibank.pvt");
-            } catch (Exception e) { return false; }
-        };
-
         CloseableHttpClient httpClient = HttpClients.custom().setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
                 .setSSLSocketFactory(SSLConnectionSocketFactoryBuilder.create()
-                        .setSslContext(sslContext)
-                        .setHostnameVerifier(ingressVerifier)
-                        .build()).build()).build();
+                        .setSslContext(sslContext).build()).build()).build();
         return new RestTemplate(new HttpComponentsClientHttpRequestFactory(httpClient));
     }
 
@@ -413,7 +397,30 @@ public class RestClientConfig {
 }
 EOF
 
-# Main App
+# Signer
+cat << 'EOF' > put-client/src/main/java/pvt/aotibank/client/put/service/PayloadSigner.java
+package pvt.aotibank.client.put.service;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import java.security.*;
+import java.util.Base64;
+@Service
+public class PayloadSigner {
+    private final PrivateKey privateKey;
+    public PayloadSigner(KeyStore signingKeyStore, 
+                         @Value("${client.ssl.key-alias}") String alias) throws Exception {
+        this.privateKey = (PrivateKey) signingKeyStore.getKey(alias, "changeit".toCharArray());
+    }
+    public String sign(String data) throws Exception {
+        Signature rsa = Signature.getInstance("SHA256withRSA");
+        rsa.initSign(privateKey);
+        rsa.update(data.getBytes());
+        return Base64.getEncoder().encodeToString(rsa.sign());
+    }
+}
+EOF
+
+# Main App (Loop)
 cat << 'EOF' > put-client/src/main/java/pvt/aotibank/client/put/PutClientApplication.java
 package pvt.aotibank.client.put;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -457,7 +464,7 @@ public class PutClientApplication implements CommandLineRunner {
 EOF
 
 # ==========================================
-# 5. GET CLIENT (Disable Hostname Check for NLB)
+# 5. GET CLIENT (Node D)
 # ==========================================
 echo ">>> 5. Creating Get Client..."
 mkdir -p get-client/src/main/java/pvt/aotibank/client/get/config
@@ -488,12 +495,11 @@ egress:
   url: https://payments.aotibank.pvt:8444/v1/payments/egress-stream
 EOF
 
-# WebClient Config (Disable Hostname Check)
+# WebClient Config (Standard mTLS, no hacks needed due to Cert SAN)
 cat << 'EOF' > get-client/src/main/java/pvt/aotibank/client/get/config/WebClientConfig.java
 package pvt.aotibank.client.get.config;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslHandler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -502,8 +508,6 @@ import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.http.client.HttpClient;
 import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.InputStream;
 import java.security.KeyStore;
@@ -528,25 +532,13 @@ public class WebClientConfig {
         tmf.init(serverTrustStore);
 
         SslContext sslContext = SslContextBuilder.forClient().keyManager(kmf).trustManager(tmf).build();
-
-        HttpClient httpClient = HttpClient.create()
-                .secure(ssl -> ssl.sslContext(sslContext))
-                .doOnConnected(conn -> {
-                    SslHandler sslHandler = conn.channel().pipeline().get(SslHandler.class);
-                    if (sslHandler != null) {
-                        SSLEngine engine = sslHandler.engine();
-                        SSLParameters params = engine.getSSLParameters();
-                        // NLB FIX: Disable hostname verification (We rely on TrustStore verification)
-                        params.setEndpointIdentificationAlgorithm(null); 
-                        engine.setSSLParameters(params);
-                    }
-                });
+        HttpClient httpClient = HttpClient.create().secure(ssl -> ssl.sslContext(sslContext));
         return WebClient.builder().clientConnector(new ReactorClientHttpConnector(httpClient)).build();
     }
 }
 EOF
 
-# Main App
+# Main App (CRITICAL FIX: Retry Logic)
 cat << 'EOF' > get-client/src/main/java/pvt/aotibank/client/get/GetClientApplication.java
 package pvt.aotibank.client.get;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -557,6 +549,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.codec.ServerSentEvent;
+import reactor.util.retry.Retry;
+import java.time.Duration;
 
 @SpringBootApplication
 public class GetClientApplication implements CommandLineRunner {
@@ -567,14 +561,26 @@ public class GetClientApplication implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        System.out.println(">>> Connecting to Stream at: " + url);
-        webClient.get().uri(url).retrieve().bodyToFlux(new ParameterizedTypeReference<ServerSentEvent<String>>() {})
-                .subscribe(event -> System.out.println("[RECEIVED] " + event.data()), 
-                           error -> System.err.println("Error: " + error.getMessage()));
+        System.out.println(">>> Starting Payment Stream Listener...");
+        connect();
         try { Thread.currentThread().join(); } catch (Exception e) {}
+    }
+
+    private void connect() {
+        webClient.get()
+                .uri(url)
+                .retrieve()
+                .bodyToFlux(new ParameterizedTypeReference<ServerSentEvent<String>>() {})
+                // Retries infinitely with 5s delay on failure
+                .retryWhen(Retry.fixedDelay(Long.MAX_VALUE, Duration.ofSeconds(5))
+                        .doBeforeRetry(signal -> System.out.println(">>> Connection lost. Retrying in 5s...")))
+                .subscribe(
+                        event -> System.out.println("[RECEIVED] " + event.data()),
+                        error -> System.err.println(">>> Fatal Error: " + error.getMessage())
+                );
     }
 }
 EOF
 
-echo ">>> SETUP COMPLETE!"
-echo ">>> Run 'mvn clean package -DskipTests' in each project folder."
+echo ">>> SETUP COMPLETE."
+echo ">>> Run 'mvn clean package -DskipTests' in each project."
