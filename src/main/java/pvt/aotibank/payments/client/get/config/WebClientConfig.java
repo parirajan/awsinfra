@@ -2,6 +2,7 @@ package pvt.aotibank.payments.client.get.config;
 
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler; // <--- NEW IMPORT
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -11,6 +12,8 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.http.client.HttpClient;
 
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.InputStream;
 import java.security.KeyStore;
@@ -47,17 +50,19 @@ public class WebClientConfig {
                 .trustManager(tmf)
                 .build();
 
-        // 4. Create HttpClient with Hostname Verification DISABLED
-        HttpClient httpClient = HttpClient.create().secure(ssl -> {
-            ssl.sslContext(sslContext);
-            // This disables the check that forces "localhost" to match "CN=server"
-            ssl.handlerConfigurator(handler -> {
-                javax.net.ssl.SSLEngine engine = handler.engine();
-                javax.net.ssl.SSLParameters params = engine.getSSLParameters();
-                params.setEndpointIdentificationAlgorithm(null); 
-                engine.setSSLParameters(params);
-            });
-        });
+        // 4. Create HttpClient with Hostname Verification DISABLED (Fixed Method)
+        HttpClient httpClient = HttpClient.create()
+                .secure(ssl -> ssl.sslContext(sslContext)) // Simply set the context here
+                .doOnConnected(conn -> {
+                    // Disable hostname verification on the connected channel
+                    SslHandler sslHandler = conn.channel().pipeline().get(SslHandler.class);
+                    if (sslHandler != null) {
+                        SSLEngine engine = sslHandler.engine();
+                        SSLParameters params = engine.getSSLParameters();
+                        params.setEndpointIdentificationAlgorithm(null); // Allows 'localhost' vs 'server' mismatch
+                        engine.setSSLParameters(params);
+                    }
+                });
 
         return WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
