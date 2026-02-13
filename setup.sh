@@ -3,13 +3,13 @@
 # ==========================================
 # 0. PREPARE WORKSPACE
 # ==========================================
-ROOT_DIR="distributed-system-fixed"
+ROOT_DIR="distributed-system-final-noverify"
 rm -rf $ROOT_DIR
 mkdir -p $ROOT_DIR
 cd $ROOT_DIR
 
 # ==========================================
-# 1. CERTIFICATE GENERATION (Golden Config)
+# 1. CERTIFICATE GENERATION
 # ==========================================
 echo ">>> 1. Generating Certificates..."
 mkdir -p certs
@@ -18,16 +18,14 @@ cd certs
 # 1.1 Root CA
 openssl req -x509 -sha256 -days 3650 -newkey rsa:4096 -keyout ca.key -out ca.crt -nodes -subj "/CN=AotiBankRootCA"
 
-# 1.2 Helper Function
+# 1.2 Helper Function (Standard Certs)
 gen_cert() {
     NAME=$1
     ALIAS=$2
     openssl req -new -newkey rsa:4096 -keyout $NAME.key -out $NAME.csr -nodes -subj "/CN=$NAME"
-    
-    # GOLDEN FIX: Add 'payments.aotibank.pvt' & 'localhost' to SAN
+    # We still add SANs for good measure, but the Client Fix below makes it optional for Get Client
     openssl x509 -req -CA ca.crt -CAkey ca.key -in $NAME.csr -out $NAME.crt -days 365 -CAcreateserial \
     -extensions SAN -extfile <(printf "[SAN]\nsubjectAltName=DNS:$NAME,DNS:localhost,DNS:payments.aotibank.pvt")
-    
     openssl pkcs12 -export -out $NAME.p12 -inkey $NAME.key -in $NAME.crt -certfile ca.crt -passout pass:changeit -name $ALIAS
 }
 
@@ -38,9 +36,7 @@ gen_cert "barterbank.payments.aotibank.pvt" "client"
 gen_cert "dispense.payments.aotibank.pvt" "client"
 
 # 1.4 Truststore
-echo ">>> Creating Truststore..."
 keytool -import -trustcacerts -noprompt -alias ca -file ca.crt -keystore truststore.p12 -storepass changeit -storetype PKCS12
-# Import Put Client Public Key for Signature Verification
 keytool -import -noprompt -alias client-public -file barterbank.payments.aotibank.pvt.crt -keystore truststore.p12 -storepass changeit -storetype PKCS12
 
 cd ..
@@ -85,7 +81,7 @@ ibm:
     queue: PAYMENT.QUEUE.IN
 EOF
 
-# Security Config
+# Security
 cat << 'EOF' > ingress-service/src/main/java/pvt/aotibank/ingress/config/SecurityConfig.java
 package pvt.aotibank.ingress.config;
 import org.springframework.context.annotation.Bean;
@@ -230,7 +226,7 @@ ibm:
     queue: PAYMENT.QUEUE.IN
 EOF
 
-# Security Config (FIX: Allows 'dispense')
+# Security (Allows 'dispense')
 cat << 'EOF' > egress-service/src/main/java/pvt/aotibank/egress/config/SecurityConfig.java
 package pvt.aotibank.egress.config;
 import org.springframework.context.annotation.Bean;
@@ -343,7 +339,7 @@ ingress:
   url: https://payments.aotibank.pvt:8443/v1/payments/ingress
 EOF
 
-# RestConfig (Standard + NLB Custom Verifier)
+# RestConfig (Custom Verifier for Ingress)
 cat << 'EOF' > put-client/src/main/java/pvt/aotibank/client/put/config/RestClientConfig.java
 package pvt.aotibank.client.put.config;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -381,7 +377,6 @@ public class RestClientConfig {
                 .loadTrustMaterial(trustKeyStore, null)
                 .build();
 
-        // Custom Verifier for Ingress
         HostnameVerifier ingressVerifier = (hostname, session) -> {
             try { return session.getPeerPrincipal().getName().contains("ingress.payments.aotibank.pvt"); } 
             catch (Exception e) { return false; }
@@ -390,7 +385,7 @@ public class RestClientConfig {
         CloseableHttpClient httpClient = HttpClients.custom().setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
                 .setSSLSocketFactory(SSLConnectionSocketFactoryBuilder.create()
                         .setSslContext(sslContext)
-                        .setHostnameVerifier(ingressVerifier) // Use Custom Verifier
+                        .setHostnameVerifier(ingressVerifier)
                         .build()).build()).build();
         return new RestTemplate(new HttpComponentsClientHttpRequestFactory(httpClient));
     }
@@ -502,12 +497,12 @@ egress:
   url: https://payments.aotibank.pvt:8444/v1/payments/egress-stream
 EOF
 
-# WebClient Config (FIX: Disable Hostname Verification for Upstream flexibility)
+# WebClient Config (THE FIX: USE TCP MODE)
 cat << 'EOF' > get-client/src/main/java/pvt/aotibank/client/get/config/WebClientConfig.java
 package pvt.aotibank.client.get.config;
+
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslHandler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -515,9 +510,9 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.http.client.HttpClient;
+import reactor.netty.tcp.SslProvider; // Required for TCP mode
+
 import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.InputStream;
 import java.security.KeyStore;
@@ -543,24 +538,19 @@ public class WebClientConfig {
 
         SslContext sslContext = SslContextBuilder.forClient().keyManager(kmf).trustManager(tmf).build();
         
+        // CRITICAL FIX: Use TCP Configuration.
+        // This defaults to "Raw TCP" behavior for SSL, effectively disabling 
+        // the HTTPS Endpoint Identification (hostname check) while keeping encryption.
         HttpClient httpClient = HttpClient.create()
-                .secure(ssl -> ssl.sslContext(sslContext))
-                .doOnConnected(conn -> {
-                    SslHandler sslHandler = conn.channel().pipeline().get(SslHandler.class);
-                    if (sslHandler != null) {
-                        SSLEngine engine = sslHandler.engine();
-                        SSLParameters params = engine.getSSLParameters();
-                        // CRITICAL: Disable Hostname check. Allows "cc.settlement.com" != CertName
-                        params.setEndpointIdentificationAlgorithm(null); 
-                        engine.setSSLParameters(params);
-                    }
-                });
+            .secure(spec -> spec.sslContext(sslContext)
+                                .defaultConfiguration(SslProvider.DefaultConfigurationType.TCP));
+
         return WebClient.builder().clientConnector(new ReactorClientHttpConnector(httpClient)).build();
     }
 }
 EOF
 
-# Main App (FIX: Retry Logic)
+# Main App
 cat << 'EOF' > get-client/src/main/java/pvt/aotibank/client/get/GetClientApplication.java
 package pvt.aotibank.client.get;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -593,7 +583,6 @@ public class GetClientApplication implements CommandLineRunner {
                 .uri(url)
                 .retrieve()
                 .bodyToFlux(new ParameterizedTypeReference<ServerSentEvent<String>>() {})
-                // FIX: Infinite Retry with 5s delay
                 .retryWhen(Retry.fixedDelay(Long.MAX_VALUE, Duration.ofSeconds(5))
                         .doBeforeRetry(signal -> System.out.println(">>> Connection lost. Retrying in 5s...")))
                 .subscribe(
@@ -605,4 +594,4 @@ public class GetClientApplication implements CommandLineRunner {
 EOF
 
 echo ">>> SETUP COMPLETE!"
-echo ">>> Run 'mvn clean package -DskipTests' in each folder."
+echo ">>> Run 'mvn clean package -DskipTests' in each project folder."
