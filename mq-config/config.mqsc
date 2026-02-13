@@ -1,18 +1,24 @@
-* 1. Define the connection channel
+cat << 'EOF' > mq-bootstrap.mqsc
+* 1. Define and Start the Listener (CRITICAL FIX)
+DEFINE LISTENER('DEV.LISTENER.TCP') TRPTYPE(TCP) PORT(1414) CONTROL(QMGR) REPLACE
+START LISTENER('DEV.LISTENER.TCP')
+
+* 2. Define the connection channel
 DEFINE CHANNEL('DEV.APP.SVRCONN') CHLTYPE(SVRCONN) TRPTYPE(TCP) REPLACE
 
-* 2. Define the payment queue
+* 3. Define the payment queue
 DEFINE QLOCAL('PAYMENT.QUEUE.IN') REPLACE
 
-* 3. CRITICAL: Disable password checking (allows empty password)
+* 4. Disable password checking (allows empty password)
 ALTER QMGR CONNAUTH(' ')
 
-* 4. CRITICAL: Unblock the 'mqm' admin user from connecting remotely
+* 5. Unblock the 'mqm' admin user
 SET CHLAUTH('DEV.APP.SVRCONN') TYPE(BLOCKUSER) USERLIST('nobody')
 
-* 5. Force the channel to use 'mqm' permissions
+* 6. Set channel to use 'mqm' permissions
 ALTER CHANNEL('DEV.APP.SVRCONN') CHLTYPE(SVRCONN) MCAUSER('mqm')
 
-* 6. Refresh security to apply changes immediately
+* 7. Refresh security
 REFRESH SECURITY TYPE(CONNAUTH)
 REFRESH SECURITY TYPE(AUTHSERV)
+EOF
