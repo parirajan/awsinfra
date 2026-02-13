@@ -31,21 +31,23 @@ mkdir -p aotibank-clients/get-client/src/main/resources
 # ==========================================
 # 2. CERTIFICATE GENERATION (FIXED ALIASES)
 # ==========================================
-echo ">>> generating certificates with correct aliases..."
+echo ">>> Generating certificates..."
 mkdir -p certs
 cd certs
 
 # CA
 openssl req -x509 -sha256 -days 3650 -newkey rsa:4096 -keyout ca.key -out ca.crt -nodes -subj "/CN=AotiBankRootCA"
 
-# SERVER (Ingress) - Note the '-name server'
+# SERVER (Ingress)
 openssl req -new -newkey rsa:4096 -keyout server.key -out server.csr -nodes -subj "/CN=server"
 openssl x509 -req -CA ca.crt -CAkey ca.key -in server.csr -out server.crt -days 365 -CAcreateserial
+# FIX: Added '-name server'
 openssl pkcs12 -export -out server-keystore.p12 -inkey server.key -in server.crt -certfile ca.crt -passout pass:changeit -name server
 
-# CLIENT (Put/Get) - Note the '-name client' (Fixes 'Key must not be null')
+# CLIENT (Put/Get)
 openssl req -new -newkey rsa:4096 -keyout client.key -out client.csr -nodes -subj "/CN=client"
 openssl x509 -req -CA ca.crt -CAkey ca.key -in client.csr -out client.crt -days 365
+# FIX: Added '-name client'
 openssl pkcs12 -export -out client-keystore.p12 -inkey client.key -in client.crt -certfile ca.crt -passout pass:password -name client
 
 # TRUSTSTORE
@@ -132,6 +134,7 @@ package pvt.aotibank.payments.ingress.model;
 public record SecurePayload(String messageId, String data, String signature) {}
 EOF
 
+# FIX: Using InputStream
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/service/SignatureService.java
 package pvt.aotibank.payments.ingress.service;
 import org.springframework.beans.factory.annotation.Value;
@@ -295,7 +298,6 @@ cat << 'EOF' > aotibank-clients/put-client/pom.xml
 </project>
 EOF
 
-# Config with RELATIVE FILE PATHS
 cat << 'EOF' > aotibank-clients/put-client/src/main/resources/application.yml
 client:
   ssl:
@@ -308,6 +310,7 @@ ingress:
   url: https://localhost:8443/v1/payments/ingress
 EOF
 
+# FIX: Added Retry Loop
 cat << 'EOF' > aotibank-clients/put-client/src/main/java/pvt/aotibank/payments/client/put/PutClientApplication.java
 package pvt.aotibank.payments.client.put;
 import org.springframework.boot.CommandLineRunner;
@@ -321,18 +324,31 @@ public class PutClientApplication {
     @Bean
     CommandLineRunner run(PaymentSender sender) {
         return args -> {
-            System.out.println(">>> Sending Test Payment...");
-            sender.send("{\"amount\": 5000, \"currency\": \"USD\", \"account\": \"123456\"}");
+            boolean sent = false;
+            while (!sent) {
+                try {
+                    System.out.println(">>> Attempting to send Payment...");
+                    sender.send("{\"amount\": 5000, \"currency\": \"USD\", \"account\": \"123456\"}");
+                    sent = true;
+                    System.out.println(">>> SUCCESS! Payment Sent.");
+                } catch (Exception e) {
+                    System.err.println(">>> Connection Failed: " + e.getMessage());
+                    System.out.println(">>> Retrying in 5 seconds...");
+                    Thread.sleep(5000);
+                }
+            }
         };
     }
 }
 EOF
 
+# FIX: Added NoopHostnameVerifier
 cat << 'EOF' > aotibank-clients/put-client/src/main/java/pvt/aotibank/payments/client/put/config/RestClientConfig.java
 package pvt.aotibank.payments.client.put.config;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.ssl.NoopHostnameVerifier;
 import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactoryBuilder;
 import org.apache.hc.core5.ssl.SSLContextBuilder;
 import org.springframework.beans.factory.annotation.Value;
@@ -361,7 +377,10 @@ public class RestClientConfig {
                 .loadTrustMaterial(trustKeyStore, null)
                 .build();
         CloseableHttpClient httpClient = HttpClients.custom().setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
-                        .setSSLSocketFactory(SSLConnectionSocketFactoryBuilder.create().setSslContext(sslContext).build()).build()).build();
+                        .setSSLSocketFactory(SSLConnectionSocketFactoryBuilder.create()
+                            .setSslContext(sslContext)
+                            .setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+                            .build()).build()).build();
         return new RestTemplate(new HttpComponentsClientHttpRequestFactory(httpClient));
     }
     @Bean
@@ -386,10 +405,7 @@ public class PayloadSigner {
                          @Value("${client.ssl.key-store-password}") String password,
                          @Value("${client.ssl.key-alias}") String alias) throws Exception {
         this.privateKey = (PrivateKey) signingKeyStore.getKey(alias, password.toCharArray());
-        // FIX: Explicit check to prevent Key Null error
-        if (this.privateKey == null) {
-            throw new RuntimeException("CRITICAL ERROR: No private key found for alias '" + alias + "'. Please check keystore generation.");
-        }
+        if(this.privateKey == null) throw new RuntimeException("Private Key null for alias: " + alias);
     }
     public String sign(String data) throws Exception {
         Signature rsa = Signature.getInstance("SHA256withRSA");
@@ -417,12 +433,10 @@ public class PaymentSender {
         this.signer = signer;
     }
     public void send(String json) {
-        try {
-            String sig = signer.sign(json);
-            SecurePayload payload = new SecurePayload(UUID.randomUUID().toString(), json, sig);
-            restTemplate.postForObject(ingressUrl, payload, String.class);
-            System.out.println("Sent Payment: " + payload.messageId());
-        } catch (Exception e) { e.printStackTrace(); }
+        String sig = "";
+        try { sig = signer.sign(json); } catch(Exception e) { throw new RuntimeException(e); }
+        SecurePayload payload = new SecurePayload(UUID.randomUUID().toString(), json, sig);
+        restTemplate.postForObject(ingressUrl, payload, String.class);
     }
 }
 EOF
@@ -446,7 +460,6 @@ cat << 'EOF' > aotibank-clients/get-client/pom.xml
 </project>
 EOF
 
-# Config with RELATIVE FILE PATHS
 cat << 'EOF' > aotibank-clients/get-client/src/main/resources/application.yml
 client:
   ssl:
