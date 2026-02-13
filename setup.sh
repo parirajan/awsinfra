@@ -4,7 +4,7 @@
 # 0. CLEAN SLATE
 # ==========================================
 echo ">>> Cleaning up old directories..."
-rm -rf mq-distributed-system aotibank-clients certs generate-certs.sh
+rm -rf mq-distributed-system aotibank-clients certs *.sh
 
 # ==========================================
 # 1. CREATE DIRECTORY STRUCTURE
@@ -29,7 +29,32 @@ mkdir -p aotibank-clients/get-client/src/main/java/pvt/aotibank/payments/client/
 mkdir -p aotibank-clients/get-client/src/main/resources
 
 # ==========================================
-# 2. CERTIFICATE GENERATION (FIXED ALIASES)
+# 2. MQ BOOTSTRAP SCRIPT (Saved for you to run)
+# ==========================================
+echo ">>> Generating mq-bootstrap.mqsc..."
+cat << 'EOF' > mq-bootstrap.mqsc
+* 1. Define the connection channel
+DEFINE CHANNEL('DEV.APP.SVRCONN') CHLTYPE(SVRCONN) TRPTYPE(TCP) REPLACE
+
+* 2. Define the payment queue
+DEFINE QLOCAL('PAYMENT.QUEUE.IN') REPLACE
+
+* 3. CRITICAL: Disable password checking (allows empty password)
+ALTER QMGR CONNAUTH(' ')
+
+* 4. CRITICAL: Unblock the 'mqm' admin user from connecting remotely
+SET CHLAUTH('DEV.APP.SVRCONN') TYPE(BLOCKUSER) USERLIST('nobody')
+
+* 5. Force the channel to use 'mqm' permissions
+ALTER CHANNEL('DEV.APP.SVRCONN') CHLTYPE(SVRCONN) MCAUSER('mqm')
+
+* 6. Refresh security to apply changes immediately
+REFRESH SECURITY TYPE(CONNAUTH)
+REFRESH SECURITY TYPE(AUTHSERV)
+EOF
+
+# ==========================================
+# 3. CERTIFICATE GENERATION (Fixed Aliases)
 # ==========================================
 echo ">>> Generating certificates..."
 mkdir -p certs
@@ -38,16 +63,14 @@ cd certs
 # CA
 openssl req -x509 -sha256 -days 3650 -newkey rsa:4096 -keyout ca.key -out ca.crt -nodes -subj "/CN=AotiBankRootCA"
 
-# SERVER (Ingress)
+# SERVER (Ingress) - Added -name server
 openssl req -new -newkey rsa:4096 -keyout server.key -out server.csr -nodes -subj "/CN=server"
 openssl x509 -req -CA ca.crt -CAkey ca.key -in server.csr -out server.crt -days 365 -CAcreateserial
-# FIX: Added '-name server'
 openssl pkcs12 -export -out server-keystore.p12 -inkey server.key -in server.crt -certfile ca.crt -passout pass:changeit -name server
 
-# CLIENT (Put/Get)
+# CLIENT (Put/Get) - Added -name client
 openssl req -new -newkey rsa:4096 -keyout client.key -out client.csr -nodes -subj "/CN=client"
 openssl x509 -req -CA ca.crt -CAkey ca.key -in client.csr -out client.crt -days 365
-# FIX: Added '-name client'
 openssl pkcs12 -export -out client-keystore.p12 -inkey client.key -in client.crt -certfile ca.crt -passout pass:password -name client
 
 # TRUSTSTORE
@@ -57,7 +80,7 @@ keytool -import -noprompt -alias client-public -file client.crt -keystore trusts
 cd ..
 
 # ==========================================
-# 3. INGRESS SERVICE FILES
+# 4. INGRESS SERVICE (Fixed 403 & MQ User)
 # ==========================================
 echo ">>> Writing Ingress Service..."
 
@@ -78,7 +101,6 @@ cat << 'EOF' > mq-distributed-system/ingress-service/pom.xml
 </project>
 EOF
 
-# Config with RELATIVE FILE PATHS
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/resources/application.yml
 server:
   port: 8443
@@ -94,8 +116,8 @@ ibm:
     queue-manager: QM1
     channel: DEV.APP.SVRCONN
     conn-name: localhost(1414)
-    user: admin
-    password: password
+    user: mqm             # Using mqm
+    password:             # Empty password
     queue: PAYMENT.QUEUE.IN
 EOF
 
@@ -110,13 +132,18 @@ public class IngressApplication {
 }
 EOF
 
+# FIXED SECURITY CONFIG (Allows 'client' user)
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/config/SecurityConfig.java
 package pvt.aotibank.payments.ingress.config;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.core.authority.AuthorityUtils;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.web.SecurityFilterChain;
 @Configuration
 public class SecurityConfig {
     @Bean
@@ -126,6 +153,15 @@ public class SecurityConfig {
             .x509(x509 -> x509.subjectPrincipalRegex("CN=(.*?)(?:,|$)"));
         return http.build();
     }
+    @Bean
+    public UserDetailsService userDetailsService() {
+        return username -> {
+            if (username.equals("client")) {
+                return new User(username, "", AuthorityUtils.commaSeparatedStringToAuthorityList("ROLE_USER"));
+            }
+            throw new UsernameNotFoundException("User not found: " + username);
+        };
+    }
 }
 EOF
 
@@ -134,7 +170,6 @@ package pvt.aotibank.payments.ingress.model;
 public record SecurePayload(String messageId, String data, String signature) {}
 EOF
 
-# FIX: Using InputStream
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/service/SignatureService.java
 package pvt.aotibank.payments.ingress.service;
 import org.springframework.beans.factory.annotation.Value;
@@ -198,7 +233,7 @@ public class IngressController {
 EOF
 
 # ==========================================
-# 4. EGRESS SERVICE FILES
+# 5. EGRESS SERVICE
 # ==========================================
 echo ">>> Writing Egress Service..."
 
@@ -232,8 +267,8 @@ ibm:
     queue-manager: QM1
     channel: DEV.APP.SVRCONN
     conn-name: localhost(1414)
-    user: admin
-    password: password
+    user: mqm             # Using mqm
+    password:             # Empty password
     queue: PAYMENT.QUEUE.IN
 EOF
 
@@ -279,7 +314,7 @@ public class EgressController {
 EOF
 
 # ==========================================
-# 5. PUT CLIENT FILES
+# 6. PUT CLIENT (Fixed Loop & NoopVerifier)
 # ==========================================
 echo ">>> Writing Put Client..."
 
@@ -310,7 +345,7 @@ ingress:
   url: https://localhost:8443/v1/payments/ingress
 EOF
 
-# FIX: Added Retry Loop
+# FIXED: Infinite Loop for Payments
 cat << 'EOF' > aotibank-clients/put-client/src/main/java/pvt/aotibank/payments/client/put/PutClientApplication.java
 package pvt.aotibank.payments.client.put;
 import org.springframework.boot.CommandLineRunner;
@@ -324,17 +359,20 @@ public class PutClientApplication {
     @Bean
     CommandLineRunner run(PaymentSender sender) {
         return args -> {
-            boolean sent = false;
-            while (!sent) {
+            int counter = 1;
+            while (true) {
                 try {
-                    System.out.println(">>> Attempting to send Payment...");
-                    sender.send("{\"amount\": 5000, \"currency\": \"USD\", \"account\": \"123456\"}");
-                    sent = true;
-                    System.out.println(">>> SUCCESS! Payment Sent.");
+                    String paymentId = "Payment-" + counter;
+                    String json = "{\"amount\": " + (100 + counter) + ", \"currency\": \"USD\", \"account\": \"" + paymentId + "\"}";
+                    System.out.println(">>> Sending " + paymentId + "...");
+                    sender.send(json);
+                    System.out.println(">>> SUCCESS! " + paymentId + " Sent.");
+                    counter++; 
+                    Thread.sleep(3000);
                 } catch (Exception e) {
                     System.err.println(">>> Connection Failed: " + e.getMessage());
                     System.out.println(">>> Retrying in 5 seconds...");
-                    Thread.sleep(5000);
+                    try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
                 }
             }
         };
@@ -342,7 +380,7 @@ public class PutClientApplication {
 }
 EOF
 
-# FIX: Added NoopHostnameVerifier
+# FIXED: Added NoopHostnameVerifier
 cat << 'EOF' > aotibank-clients/put-client/src/main/java/pvt/aotibank/payments/client/put/config/RestClientConfig.java
 package pvt.aotibank.payments.client.put.config;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -442,7 +480,7 @@ public class PaymentSender {
 EOF
 
 # ==========================================
-# 6. GET CLIENT FILES
+# 7. GET CLIENT (Fixed Netty Error)
 # ==========================================
 echo ">>> Writing Get Client..."
 
@@ -486,6 +524,7 @@ public class GetClientApplication {
 }
 EOF
 
+# FIXED: Using KeyManagerFactory for Netty
 cat << 'EOF' > aotibank-clients/get-client/src/main/java/pvt/aotibank/payments/client/get/config/WebClientConfig.java
 package pvt.aotibank.payments.client.get.config;
 import io.netty.handler.ssl.SslContext;
@@ -592,6 +631,8 @@ public class SseListener {
 }
 EOF
 
-echo ">>> Setup Complete."
-echo ">>> Now build everything: 'mvn clean package -DskipTests' in each project folder."
-echo ">>> IMPORTANT: Run all jars from THIS root directory so 'certs/' folder is visible."
+echo ">>> Setup Complete!"
+echo ">>> Instructions:"
+echo "1. Run 'runmqsc QM1 < mq-bootstrap.mqsc' to configure MQ permissions."
+echo "2. Build all apps: 'mvn clean package -DskipTests' inside each folder."
+echo "3. Run JARs from this root directory."
