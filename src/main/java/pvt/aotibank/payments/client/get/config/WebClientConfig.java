@@ -1,8 +1,8 @@
-package pvt.aotibank.payments.client.get.config;
+package pvt.aotibank.client.get.config;
 
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslHandler; // <--- IMPORTS ARE CRITICAL
+import io.netty.handler.ssl.SslHandler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -28,21 +28,15 @@ public class WebClientConfig {
 
     @Bean
     public WebClient mtlsWebClient() throws Exception {
-        System.out.println(">>> Initializing mTLS WebClient...");
-
-        // 1. Load Client Identity
+        // 1. Load Client Identity (Your Key)
         KeyStore clientKeyStore = KeyStore.getInstance("PKCS12");
-        try (InputStream is = keyStore.getInputStream()) {
-            clientKeyStore.load(is, keyStorePassword.toCharArray());
-        }
+        try (InputStream is = keyStore.getInputStream()) { clientKeyStore.load(is, keyStorePassword.toCharArray()); }
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(clientKeyStore, keyStorePassword.toCharArray());
 
-        // 2. Load TrustStore
+        // 2. Load TrustStore (Provider's Public Key/CA)
         KeyStore serverTrustStore = KeyStore.getInstance("PKCS12");
-        try (InputStream is = trustStore.getInputStream()) {
-            serverTrustStore.load(is, trustStorePassword.toCharArray());
-        }
+        try (InputStream is = trustStore.getInputStream()) { serverTrustStore.load(is, trustStorePassword.toCharArray()); }
         TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         tmf.init(serverTrustStore);
 
@@ -52,22 +46,22 @@ public class WebClientConfig {
                 .trustManager(tmf)
                 .build();
 
-        // 4. HttpClient with Hostname Verification DISABLED
-        // Uses 'doOnConnected' which works in ALL versions
+        // 4. Create HttpClient with Hostname Verification DISABLED
         HttpClient httpClient = HttpClient.create()
-                .secure(ssl -> ssl.sslContext(sslContext))
+                .secure(ssl -> ssl.sslContext(sslContext)) // Apply the SSL Context
                 .doOnConnected(conn -> {
-                    // This block runs when the connection connects
-                    System.out.println(">>> Connection Established. Disabling Hostname Verification...");
+                    // This block runs immediately after connection is established
                     SslHandler sslHandler = conn.channel().pipeline().get(SslHandler.class);
                     if (sslHandler != null) {
                         SSLEngine engine = sslHandler.engine();
                         SSLParameters params = engine.getSSLParameters();
                         
-                        // This effectively disables the 'localhost' vs 'server' mismatch check
+                        // CRITICAL: Setting this to NULL disables the hostname check.
+                        // Java will no longer check if 'cc.settlement.com' matches the Cert CN.
                         params.setEndpointIdentificationAlgorithm(null); 
                         
                         engine.setSSLParameters(params);
+                        System.out.println(">>> Hostname Verification Disabled for this connection.");
                     }
                 });
 
