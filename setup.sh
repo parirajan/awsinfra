@@ -24,12 +24,16 @@ gen_cert() {
     ALIAS=$2
     # Create Key & CSR
     openssl req -new -newkey rsa:4096 -keyout $NAME.key -out $NAME.csr -nodes -subj "/CN=$NAME"
-    # Sign with CA (Add SAN for strict security)
+    
+    # --- CRITICAL FIX: ADD 'payments.aotibank.pvt' TO SAN ---
+    # This tells Java: "It is valid if I am accessed via payments.aotibank.pvt"
     openssl x509 -req -CA ca.crt -CAkey ca.key -in $NAME.csr -out $NAME.crt -days 365 -CAcreateserial \
-    -extensions SAN -extfile <(printf "[SAN]\nsubjectAltName=DNS:$NAME,DNS:localhost")
+    -extensions SAN -extfile <(printf "[SAN]\nsubjectAltName=DNS:$NAME,DNS:localhost,DNS:payments.aotibank.pvt")
+    
     # Export to PKCS12
     openssl pkcs12 -export -out $NAME.p12 -inkey $NAME.key -in $NAME.crt -certfile ca.crt -passout pass:changeit -name $ALIAS
 }
+
 
 # 1.3 Generate Identities
 gen_cert "ingress.payments.aotibank.pvt" "server"
