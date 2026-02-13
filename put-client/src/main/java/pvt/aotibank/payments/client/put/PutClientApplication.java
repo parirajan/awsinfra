@@ -13,15 +13,31 @@ public class PutClientApplication {
         SpringApplication.run(PutClientApplication.class, args);
     }
 
-    // Trigger sending a test payment on startup
     @Bean
     CommandLineRunner run(PaymentSender sender) {
         return args -> {
-            System.out.println(">>> Sending Payment 1...");
-            sender.sendPayment("{\"amount\": 5000, \"currency\": \"USD\", \"account\": \"123456\"}");
+            int counter = 1;
             
-            System.out.println(">>> Sending Payment 2...");
-            sender.sendPayment("{\"amount\": 150, \"currency\": \"EUR\", \"account\": \"987654\"}");
+            // Infinite loop to keep sending payments
+            while (true) {
+                try {
+                    String paymentId = "Payment-" + counter;
+                    String json = "{\"amount\": " + (100 + counter) + ", \"currency\": \"USD\", \"account\": \"" + paymentId + "\"}";
+                    
+                    System.out.println(">>> Sending " + paymentId + "...");
+                    sender.send(json);
+                    
+                    System.out.println(">>> SUCCESS! " + paymentId + " Sent.");
+                    
+                    counter++; 
+                    Thread.sleep(3000); // Wait 3 seconds before next payment
+                    
+                } catch (Exception e) {
+                    System.err.println(">>> Connection Failed: " + e.getMessage());
+                    System.out.println(">>> Retrying in 5 seconds...");
+                    try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
+                }
+            }
         };
     }
 }
