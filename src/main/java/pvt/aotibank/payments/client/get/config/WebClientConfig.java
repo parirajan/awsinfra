@@ -2,7 +2,6 @@ package pvt.aotibank.client.get.config;
 
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslHandler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -10,10 +9,9 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.http.client.HttpClient;
+import reactor.netty.tcp.SslProvider; // Required for TCP mode
 
 import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.InputStream;
 import java.security.KeyStore;
@@ -28,15 +26,19 @@ public class WebClientConfig {
 
     @Bean
     public WebClient mtlsWebClient() throws Exception {
-        // 1. Load Client Identity (Your Key)
+        // 1. Load Client Identity
         KeyStore clientKeyStore = KeyStore.getInstance("PKCS12");
-        try (InputStream is = keyStore.getInputStream()) { clientKeyStore.load(is, keyStorePassword.toCharArray()); }
+        try (InputStream is = keyStore.getInputStream()) {
+            clientKeyStore.load(is, keyStorePassword.toCharArray());
+        }
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(clientKeyStore, keyStorePassword.toCharArray());
 
-        // 2. Load TrustStore (Provider's Public Key/CA)
+        // 2. Load TrustStore
         KeyStore serverTrustStore = KeyStore.getInstance("PKCS12");
-        try (InputStream is = trustStore.getInputStream()) { serverTrustStore.load(is, trustStorePassword.toCharArray()); }
+        try (InputStream is = trustStore.getInputStream()) {
+            serverTrustStore.load(is, trustStorePassword.toCharArray());
+        }
         TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         tmf.init(serverTrustStore);
 
@@ -46,24 +48,13 @@ public class WebClientConfig {
                 .trustManager(tmf)
                 .build();
 
-        // 4. Create HttpClient with Hostname Verification DISABLED
+        // 4. Create HttpClient with TCP Configuration (Disables Hostname Verification)
         HttpClient httpClient = HttpClient.create()
-                .secure(ssl -> ssl.sslContext(sslContext)) // Apply the SSL Context
-                .doOnConnected(conn -> {
-                    // This block runs immediately after connection is established
-                    SslHandler sslHandler = conn.channel().pipeline().get(SslHandler.class);
-                    if (sslHandler != null) {
-                        SSLEngine engine = sslHandler.engine();
-                        SSLParameters params = engine.getSSLParameters();
-                        
-                        // CRITICAL: Setting this to NULL disables the hostname check.
-                        // Java will no longer check if 'cc.settlement.com' matches the Cert CN.
-                        params.setEndpointIdentificationAlgorithm(null); 
-                        
-                        engine.setSSLParameters(params);
-                        System.out.println(">>> Hostname Verification Disabled for this connection.");
-                    }
-                });
+                .secure(spec -> spec.sslContext(sslContext)
+                        // CRITICAL FIX: This sets the default configuration to TCP.
+                        // It ensures the connection is treated as raw TCP with SSL,
+                        // bypassing the HTTPS hostname verification checks entirely.
+                        .defaultConfiguration(SslProvider.DefaultConfigurationType.TCP));
 
         return WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
