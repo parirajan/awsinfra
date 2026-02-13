@@ -2,7 +2,7 @@ package pvt.aotibank.payments.client.get.config;
 
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslHandler; // <--- NEW IMPORT
+import io.netty.handler.ssl.SslHandler; // <--- CRITICAL NEW IMPORT
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -50,16 +50,20 @@ public class WebClientConfig {
                 .trustManager(tmf)
                 .build();
 
-        // 4. Create HttpClient with Hostname Verification DISABLED (Fixed Method)
+        // 4. Create HttpClient with Hostname Verification DISABLED
+        // We use 'doOnConnected' because 'handlerConfigurator' is removed in newer versions
         HttpClient httpClient = HttpClient.create()
-                .secure(ssl -> ssl.sslContext(sslContext)) // Simply set the context here
+                .secure(ssl -> ssl.sslContext(sslContext))
                 .doOnConnected(conn -> {
-                    // Disable hostname verification on the connected channel
+                    // Access the SSL Handler and turn off the Hostname Check
                     SslHandler sslHandler = conn.channel().pipeline().get(SslHandler.class);
                     if (sslHandler != null) {
                         SSLEngine engine = sslHandler.engine();
                         SSLParameters params = engine.getSSLParameters();
-                        params.setEndpointIdentificationAlgorithm(null); // Allows 'localhost' vs 'server' mismatch
+                        
+                        // Setting this to null tells Java: "Don't check if the cert name matches 'localhost'"
+                        params.setEndpointIdentificationAlgorithm(null); 
+                        
                         engine.setSSLParameters(params);
                     }
                 });
