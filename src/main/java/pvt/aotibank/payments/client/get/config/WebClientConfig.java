@@ -2,7 +2,7 @@ package pvt.aotibank.payments.client.get.config;
 
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslHandler; // <--- CRITICAL NEW IMPORT
+import io.netty.handler.ssl.SslHandler; // <--- IMPORTS ARE CRITICAL
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -28,6 +28,8 @@ public class WebClientConfig {
 
     @Bean
     public WebClient mtlsWebClient() throws Exception {
+        System.out.println(">>> Initializing mTLS WebClient...");
+
         // 1. Load Client Identity
         KeyStore clientKeyStore = KeyStore.getInstance("PKCS12");
         try (InputStream is = keyStore.getInputStream()) {
@@ -50,18 +52,19 @@ public class WebClientConfig {
                 .trustManager(tmf)
                 .build();
 
-        // 4. Create HttpClient with Hostname Verification DISABLED
-        // We use 'doOnConnected' because 'handlerConfigurator' is removed in newer versions
+        // 4. HttpClient with Hostname Verification DISABLED
+        // Uses 'doOnConnected' which works in ALL versions
         HttpClient httpClient = HttpClient.create()
                 .secure(ssl -> ssl.sslContext(sslContext))
                 .doOnConnected(conn -> {
-                    // Access the SSL Handler and turn off the Hostname Check
+                    // This block runs when the connection connects
+                    System.out.println(">>> Connection Established. Disabling Hostname Verification...");
                     SslHandler sslHandler = conn.channel().pipeline().get(SslHandler.class);
                     if (sslHandler != null) {
                         SSLEngine engine = sslHandler.engine();
                         SSLParameters params = engine.getSSLParameters();
                         
-                        // Setting this to null tells Java: "Don't check if the cert name matches 'localhost'"
+                        // This effectively disables the 'localhost' vs 'server' mismatch check
                         params.setEndpointIdentificationAlgorithm(null); 
                         
                         engine.setSSLParameters(params);
