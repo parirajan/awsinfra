@@ -20,7 +20,7 @@ import java.security.KeyStore;
 public class RestClientConfig {
 
     @Value("${client.ssl.key-store}")
-    private Resource keyStore;
+    private Resource keyStore; // Works with "classpath:" OR "file:"
 
     @Value("${client.ssl.key-store-password}")
     private String keyStorePassword;
@@ -33,30 +33,29 @@ public class RestClientConfig {
 
     @Bean
     public RestTemplate mtlsRestTemplate() throws Exception {
-        // 1. Load Client KeyStore from Stream (JAR-safe)
+        // 1. Load Client KeyStore safely from Stream
         KeyStore clientKeyStore = KeyStore.getInstance("PKCS12");
         try (InputStream is = keyStore.getInputStream()) {
             clientKeyStore.load(is, keyStorePassword.toCharArray());
         }
 
-        // 2. Load TrustStore from Stream (JAR-safe)
+        // 2. Load TrustStore safely from Stream
         KeyStore trustKeyStore = KeyStore.getInstance("PKCS12");
         try (InputStream is = trustStore.getInputStream()) {
             trustKeyStore.load(is, trustStorePassword.toCharArray());
         }
 
-        // 3. Build SSL Context using KeyStore OBJECTS (not file paths)
+        // 3. Build SSL Context
         SSLContext sslContext = SSLContextBuilder.create()
                 .loadKeyMaterial(clientKeyStore, keyStorePassword.toCharArray())
-                .loadTrustMaterial(trustKeyStore, null) // null = trust all in truststore
+                .loadTrustMaterial(trustKeyStore, null) // Trust all in truststore
                 .build();
 
-        // 4. Configure HttpClient
+        // 4. Configure Apache HttpClient
         CloseableHttpClient httpClient = HttpClients.custom()
                 .setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
                         .setSSLSocketFactory(SSLConnectionSocketFactoryBuilder.create()
-                                .setSslContext(sslContext)
-                                .build())
+                                .setSslContext(sslContext).build())
                         .build())
                 .build();
 
