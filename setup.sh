@@ -1,10 +1,14 @@
 #!/bin/bash
 
-# 1. Clean up previous attempts to avoid confusion
+# ==========================================
+# 0. CLEAN SLATE
+# ==========================================
 echo ">>> Cleaning up old directories..."
-rm -rf mq-distributed-system aotibank-clients certs
+rm -rf mq-distributed-system aotibank-clients certs generate-certs.sh
 
-# 2. Create Directory Structure
+# ==========================================
+# 1. CREATE DIRECTORY STRUCTURE
+# ==========================================
 echo ">>> Creating Folder Structure..."
 mkdir -p mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/config
 mkdir -p mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/controller
@@ -25,43 +29,36 @@ mkdir -p aotibank-clients/get-client/src/main/java/pvt/aotibank/payments/client/
 mkdir -p aotibank-clients/get-client/src/main/resources
 
 # ==========================================
-# 3. CERTIFICATE GENERATION SCRIPT (FIXED)
+# 2. CERTIFICATE GENERATION (FIXED ALIASES)
 # ==========================================
-echo ">>> Writing generate-certs.sh (with -name fixes)..."
-cat << 'EOF' > generate-certs.sh
-#!/bin/bash
+echo ">>> generating certificates with correct aliases..."
 mkdir -p certs
 cd certs
 
-echo "--- Generating CA ---"
+# CA
 openssl req -x509 -sha256 -days 3650 -newkey rsa:4096 -keyout ca.key -out ca.crt -nodes -subj "/CN=AotiBankRootCA"
 
-echo "--- Generating Server Cert (Ingress/Egress) ---"
+# SERVER (Ingress) - Note the '-name server'
 openssl req -new -newkey rsa:4096 -keyout server.key -out server.csr -nodes -subj "/CN=server"
 openssl x509 -req -CA ca.crt -CAkey ca.key -in server.csr -out server.crt -days 365 -CAcreateserial
-# FIX: Added '-name server'
 openssl pkcs12 -export -out server-keystore.p12 -inkey server.key -in server.crt -certfile ca.crt -passout pass:changeit -name server
 
-echo "--- Generating Client Cert (Put/Get) ---"
+# CLIENT (Put/Get) - Note the '-name client' (Fixes 'Key must not be null')
 openssl req -new -newkey rsa:4096 -keyout client.key -out client.csr -nodes -subj "/CN=client"
 openssl x509 -req -CA ca.crt -CAkey ca.key -in client.csr -out client.crt -days 365
-# FIX: Added '-name client'
 openssl pkcs12 -export -out client-keystore.p12 -inkey client.key -in client.crt -certfile ca.crt -passout pass:password -name client
 
-echo "--- Creating Truststore ---"
+# TRUSTSTORE
 keytool -import -trustcacerts -noprompt -alias ca -file ca.crt -keystore truststore.p12 -storepass changeit -storetype PKCS12
 keytool -import -noprompt -alias client-public -file client.crt -keystore truststore.p12 -storepass changeit -storetype PKCS12
 
-echo "Certs generated in ./certs/"
-EOF
-chmod +x generate-certs.sh
+cd ..
 
 # ==========================================
-# 4. INGRESS SERVICE (SERVER)
+# 3. INGRESS SERVICE FILES
 # ==========================================
 echo ">>> Writing Ingress Service..."
 
-# POM
 cat << 'EOF' > mq-distributed-system/ingress-service/pom.xml
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -79,14 +76,16 @@ cat << 'EOF' > mq-distributed-system/ingress-service/pom.xml
 </project>
 EOF
 
-# Config (Generic - will be overridden by command args)
+# Config with RELATIVE FILE PATHS
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/resources/application.yml
 server:
   port: 8443
   ssl:
     enabled: true
     client-auth: need
+    key-store: file:certs/server-keystore.p12
     key-store-password: changeit
+    trust-store: file:certs/truststore.p12
     trust-store-password: changeit
 ibm:
   mq:
@@ -98,7 +97,6 @@ ibm:
     queue: PAYMENT.QUEUE.IN
 EOF
 
-# Main
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/IngressApplication.java
 package pvt.aotibank.payments.ingress;
 import org.springframework.boot.SpringApplication;
@@ -110,7 +108,6 @@ public class IngressApplication {
 }
 EOF
 
-# SecurityConfig
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/config/SecurityConfig.java
 package pvt.aotibank.payments.ingress.config;
 import org.springframework.context.annotation.Bean;
@@ -130,13 +127,11 @@ public class SecurityConfig {
 }
 EOF
 
-# SecurePayload
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/model/SecurePayload.java
 package pvt.aotibank.payments.ingress.model;
 public record SecurePayload(String messageId, String data, String signature) {}
 EOF
 
-# SignatureService (FIXED: Uses InputStream)
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/service/SignatureService.java
 package pvt.aotibank.payments.ingress.service;
 import org.springframework.beans.factory.annotation.Value;
@@ -168,7 +163,6 @@ public class SignatureService {
 }
 EOF
 
-# Controller
 cat << 'EOF' > mq-distributed-system/ingress-service/src/main/java/pvt/aotibank/payments/ingress/controller/IngressController.java
 package pvt.aotibank.payments.ingress.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -186,7 +180,6 @@ public class IngressController {
     @Autowired private SignatureService signatureService;
     @Value("${ibm.mq.queue}") private String queueName;
     private final ObjectMapper objectMapper = new ObjectMapper();
-
     @PostMapping("/ingress")
     public ResponseEntity<String> accept(@RequestBody SecurePayload payload) {
         if (!signatureService.verify(payload.data(), payload.signature())) {
@@ -202,11 +195,10 @@ public class IngressController {
 EOF
 
 # ==========================================
-# 5. EGRESS SERVICE (SERVER)
+# 4. EGRESS SERVICE FILES
 # ==========================================
 echo ">>> Writing Egress Service..."
 
-# POM
 cat << 'EOF' > mq-distributed-system/egress-service/pom.xml
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -222,14 +214,15 @@ cat << 'EOF' > mq-distributed-system/egress-service/pom.xml
 </project>
 EOF
 
-# Config
 cat << 'EOF' > mq-distributed-system/egress-service/src/main/resources/application.yml
 server:
   port: 8444
   ssl:
     enabled: true
     client-auth: need
+    key-store: file:certs/server-keystore.p12
     key-store-password: changeit
+    trust-store: file:certs/truststore.p12
     trust-store-password: changeit
 ibm:
   mq:
@@ -241,7 +234,6 @@ ibm:
     queue: PAYMENT.QUEUE.IN
 EOF
 
-# Main
 cat << 'EOF' > mq-distributed-system/egress-service/src/main/java/pvt/aotibank/payments/egress/EgressApplication.java
 package pvt.aotibank.payments.egress;
 import org.springframework.boot.SpringApplication;
@@ -253,7 +245,6 @@ public class EgressApplication {
 }
 EOF
 
-# Controller
 cat << 'EOF' > mq-distributed-system/egress-service/src/main/java/pvt/aotibank/payments/egress/controller/EgressController.java
 package pvt.aotibank.payments.egress.controller;
 import org.springframework.jms.annotation.JmsListener;
@@ -285,11 +276,10 @@ public class EgressController {
 EOF
 
 # ==========================================
-# 6. PUT CLIENT (CLIENT A)
+# 5. PUT CLIENT FILES
 # ==========================================
 echo ">>> Writing Put Client..."
 
-# POM
 cat << 'EOF' > aotibank-clients/put-client/pom.xml
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -305,18 +295,19 @@ cat << 'EOF' > aotibank-clients/put-client/pom.xml
 </project>
 EOF
 
-# Config
+# Config with RELATIVE FILE PATHS
 cat << 'EOF' > aotibank-clients/put-client/src/main/resources/application.yml
 client:
   ssl:
+    key-store: file:certs/client-keystore.p12
     key-store-password: password
     key-alias: client
+    trust-store: file:certs/truststore.p12
     trust-store-password: changeit
 ingress:
   url: https://localhost:8443/v1/payments/ingress
 EOF
 
-# Main
 cat << 'EOF' > aotibank-clients/put-client/src/main/java/pvt/aotibank/payments/client/put/PutClientApplication.java
 package pvt.aotibank.payments.client.put;
 import org.springframework.boot.CommandLineRunner;
@@ -337,7 +328,6 @@ public class PutClientApplication {
 }
 EOF
 
-# RestClientConfig (FIXED: InputStream)
 cat << 'EOF' > aotibank-clients/put-client/src/main/java/pvt/aotibank/payments/client/put/config/RestClientConfig.java
 package pvt.aotibank.payments.client.put.config;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -383,7 +373,6 @@ public class RestClientConfig {
 }
 EOF
 
-# PayloadSigner
 cat << 'EOF' > aotibank-clients/put-client/src/main/java/pvt/aotibank/payments/client/put/service/PayloadSigner.java
 package pvt.aotibank.payments.client.put.service;
 import org.springframework.beans.factory.annotation.Value;
@@ -397,7 +386,10 @@ public class PayloadSigner {
                          @Value("${client.ssl.key-store-password}") String password,
                          @Value("${client.ssl.key-alias}") String alias) throws Exception {
         this.privateKey = (PrivateKey) signingKeyStore.getKey(alias, password.toCharArray());
-        if(this.privateKey == null) throw new RuntimeException("Private Key null for alias: " + alias);
+        // FIX: Explicit check to prevent Key Null error
+        if (this.privateKey == null) {
+            throw new RuntimeException("CRITICAL ERROR: No private key found for alias '" + alias + "'. Please check keystore generation.");
+        }
     }
     public String sign(String data) throws Exception {
         Signature rsa = Signature.getInstance("SHA256withRSA");
@@ -408,7 +400,6 @@ public class PayloadSigner {
 }
 EOF
 
-# PaymentSender
 cat << 'EOF' > aotibank-clients/put-client/src/main/java/pvt/aotibank/payments/client/put/service/PaymentSender.java
 package pvt.aotibank.payments.client.put.service;
 import org.springframework.beans.factory.annotation.Value;
@@ -437,11 +428,10 @@ public class PaymentSender {
 EOF
 
 # ==========================================
-# 7. GET CLIENT (CLIENT B)
+# 6. GET CLIENT FILES
 # ==========================================
 echo ">>> Writing Get Client..."
 
-# POM
 cat << 'EOF' > aotibank-clients/get-client/pom.xml
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -456,17 +446,18 @@ cat << 'EOF' > aotibank-clients/get-client/pom.xml
 </project>
 EOF
 
-# Config
+# Config with RELATIVE FILE PATHS
 cat << 'EOF' > aotibank-clients/get-client/src/main/resources/application.yml
 client:
   ssl:
+    key-store: file:certs/client-keystore.p12
     key-store-password: password
+    trust-store: file:certs/truststore.p12
     trust-store-password: changeit
 egress:
   url: https://localhost:8444/v1/payments/egress-stream
 EOF
 
-# Main
 cat << 'EOF' > aotibank-clients/get-client/src/main/java/pvt/aotibank/payments/client/get/GetClientApplication.java
 package pvt.aotibank.payments.client.get;
 import org.springframework.boot.SpringApplication;
@@ -482,7 +473,6 @@ public class GetClientApplication {
 }
 EOF
 
-# WebClientConfig (FIXED: KeyManagerFactory)
 cat << 'EOF' > aotibank-clients/get-client/src/main/java/pvt/aotibank/payments/client/get/config/WebClientConfig.java
 package pvt.aotibank.payments.client.get.config;
 import io.netty.handler.ssl.SslContext;
@@ -521,7 +511,6 @@ public class WebClientConfig {
 }
 EOF
 
-# PayloadVerifier (FIXED: InputStream)
 cat << 'EOF' > aotibank-clients/get-client/src/main/java/pvt/aotibank/payments/client/get/service/PayloadVerifier.java
 package pvt.aotibank.payments.client.get.service;
 import org.springframework.beans.factory.annotation.Value;
@@ -553,7 +542,6 @@ public class PayloadVerifier {
 }
 EOF
 
-# SseListener
 cat << 'EOF' > aotibank-clients/get-client/src/main/java/pvt/aotibank/payments/client/get/service/SseListener.java
 package pvt.aotibank.payments.client.get.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -591,13 +579,6 @@ public class SseListener {
 }
 EOF
 
-echo ">>> Setup Complete!"
-echo ""
-echo "NEXT STEPS:"
-echo "1. Run './generate-certs.sh' to create keys with correct aliases."
-echo "2. Build all projects using 'mvn clean package -DskipTests'."
-echo "3. Run your services pointing to the 'certs' folder:"
-echo ""
-echo "   java -jar mq-distributed-system/ingress-service/target/ingress-service-1.0.0.jar \\"
-echo "     --server.ssl.key-store=file:certs/server-keystore.p12 \\"
-echo "     --server.ssl.trust-store=file:certs/truststore.p12"
+echo ">>> Setup Complete."
+echo ">>> Now build everything: 'mvn clean package -DskipTests' in each project folder."
+echo ">>> IMPORTANT: Run all jars from THIS root directory so 'certs/' folder is visible."
