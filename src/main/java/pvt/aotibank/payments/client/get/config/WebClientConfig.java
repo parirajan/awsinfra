@@ -9,7 +9,6 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.http.client.HttpClient;
-import reactor.netty.tcp.SslProvider; // Required for TCP mode
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
@@ -26,35 +25,24 @@ public class WebClientConfig {
 
     @Bean
     public WebClient mtlsWebClient() throws Exception {
-        // 1. Load Client Identity
         KeyStore clientKeyStore = KeyStore.getInstance("PKCS12");
-        try (InputStream is = keyStore.getInputStream()) {
-            clientKeyStore.load(is, keyStorePassword.toCharArray());
-        }
+        try (InputStream is = keyStore.getInputStream()) { clientKeyStore.load(is, keyStorePassword.toCharArray()); }
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(clientKeyStore, keyStorePassword.toCharArray());
 
-        // 2. Load TrustStore
         KeyStore serverTrustStore = KeyStore.getInstance("PKCS12");
-        try (InputStream is = trustStore.getInputStream()) {
-            serverTrustStore.load(is, trustStorePassword.toCharArray());
-        }
+        try (InputStream is = trustStore.getInputStream()) { serverTrustStore.load(is, trustStorePassword.toCharArray()); }
         TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         tmf.init(serverTrustStore);
 
-        // 3. Build SSL Context
         SslContext sslContext = SslContextBuilder.forClient()
                 .keyManager(kmf)
                 .trustManager(tmf)
                 .build();
 
-        // 4. Create HttpClient with TCP Configuration (Disables Hostname Verification)
-        HttpClient httpClient = HttpClient.create()
-                .secure(spec -> spec.sslContext(sslContext)
-                        // CRITICAL FIX: This sets the default configuration to TCP.
-                        // It ensures the connection is treated as raw TCP with SSL,
-                        // bypassing the HTTPS hostname verification checks entirely.
-                        .defaultConfiguration(SslProvider.DefaultConfigurationType.TCP));
+        // STANDARD CONFIG: No hacks. 
+        // This works IF the certificate is correct.
+        HttpClient httpClient = HttpClient.create().secure(ssl -> ssl.sslContext(sslContext));
 
         return WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
