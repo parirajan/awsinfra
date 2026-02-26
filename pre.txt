@@ -1,0 +1,70 @@
+Sub DrawSaferPaymentsArchitecture()
+    Dim sld As Slide
+    Dim shpModel As Shape
+    Dim shpExec As Shape
+    Dim shpICCM As Shape
+    
+    ' Create a new blank slide
+    Set sld = ActivePresentation.Slides.Add(ActivePresentation.Slides.Count + 1, ppLayoutBlank)
+    
+    ' 1. Draw Model Cluster (Left Box)
+    Set shpModel = sld.Shapes.AddShape(msoShapeRoundedRectangle, 50, 150, 300, 250)
+    With shpModel
+        .Fill.ForeColor.RGB = RGB(220, 230, 242) ' Light Blue
+        .Line.ForeColor.RGB = RGB(41, 63, 84)
+        .Line.Weight = 2
+        .TextFrame.TextRange.Text = "MODEL CLUSTER" & vbCrLf & "(Analytics & Discovery)" & vbCrLf & vbCrLf & _
+                                    "• Historical Data Loads" & vbCrLf & _
+                                    "• Near Real-Time (NRT) Data" & vbCrLf & _
+                                    "• Fraud Modelers (Define Rules)" & vbCrLf & _
+                                    "• Data Scientists (Simulations)"
+        .TextFrame.TextRange.Font.Color.RGB = RGB(0, 0, 0)
+        .TextFrame.TextRange.Font.Size = 14
+        .TextFrame.TextRange.Font.Name = "Calibri"
+        .TextFrame.TextRange.Paragraphs(1).Font.Bold = msoTrue
+        .TextFrame.TextRange.Paragraphs(1).Font.Size = 18
+    End With
+    
+    ' 2. Draw Exec Cluster (Right Box)
+    Set shpExec = sld.Shapes.AddShape(msoShapeRoundedRectangle, 610, 150, 300, 250)
+    With shpExec
+        .Fill.ForeColor.RGB = RGB(253, 233, 217) ' Light Orange
+        .Line.ForeColor.RGB = RGB(198, 89, 17)
+        .Line.Weight = 2
+        .TextFrame.TextRange.Text = "EXEC CLUSTER" & vbCrLf & "(Real-Time Production)" & vbCrLf & vbCrLf & _
+                                    "• Live Payment Stream" & vbCrLf & _
+                                    "• Optimized Rule Engine" & vbCrLf & _
+                                    "• Ultra-Low Latency Processing" & vbCrLf & _
+                                    "• Real-Time Insights (Approve/Decline)"
+        .TextFrame.TextRange.Font.Color.RGB = RGB(0, 0, 0)
+        .TextFrame.TextRange.Font.Size = 14
+        .TextFrame.TextRange.Font.Name = "Calibri"
+        .TextFrame.TextRange.Paragraphs(1).Font.Bold = msoTrue
+        .TextFrame.TextRange.Paragraphs(1).Font.Size = 18
+    End With
+    
+    ' 3. Draw ICCM Bridge (Middle Arrow)
+    Set shpICCM = sld.Shapes.AddShape(msoShapeRightArrow, 360, 225, 240, 100)
+    With shpICCM
+        .Fill.ForeColor.RGB = RGB(41, 63, 84) ' Dark Blue
+        .Line.Visible = msoFalse
+        .TextFrame.TextRange.Text = "ICCM SCRIPTS" & vbCrLf & "Promote Rules & Models via Journal Export"
+        .TextFrame.TextRange.Font.Color.RGB = RGB(255, 255, 255)
+        .TextFrame.TextRange.Font.Size = 12
+        .TextFrame.TextRange.Font.Name = "Calibri"
+        .TextFrame.TextRange.Paragraphs(1).Font.Bold = msoTrue
+        .TextFrame.TextRange.Paragraphs(1).Font.Size = 16
+    End With
+
+    ' Add a Title
+    Dim shpTitle As Shape
+    Set shpTitle = sld.Shapes.AddTextbox(msoTextOrientationHorizontal, 50, 50, 860, 50)
+    With shpTitle
+        .TextFrame.TextRange.Text = "IBM Safer Payments: Cluster Deployment Flow"
+        .TextFrame.TextRange.Font.Size = 28
+        .TextFrame.TextRange.Font.Bold = msoTrue
+        .TextFrame.TextRange.Font.Color.RGB = RGB(41, 63, 84)
+        .TextFrame.TextRange.ParagraphFormat.Alignment = ppAlignCenter
+    End With
+
+End Sub
