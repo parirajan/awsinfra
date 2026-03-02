@@ -1,20 +1,31 @@
 #!/bin/bash
-PROJECT_NAME="mq-ami-factory"
+PROJECT_NAME="mq-ami-ubi-factory"
 mkdir -p $PROJECT_NAME/roles/ibm_mq/{tasks,vars}
 
-echo "[+] Generating Dockerfile..."
+echo "[+] Generating UBI-based Dockerfile..."
 cat <<EOF > $PROJECT_NAME/Dockerfile
-FROM alpine:3.18
-RUN apk add --no-cache packer ansible py3-pip python3 openssh-client bash
-RUN pip3 install botocore boto3
+FROM redhat/ubi9:latest
+
+# Install system dependencies
+RUN dnf install -y python3-pip python3-devel gcc openssh-clients unzip yum-utils
+
+# Install Packer
+RUN yum-config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo && \
+    dnf install -y packer
+
+# Install Ansible and AWS requirements
+RUN pip3 install --no-cache-dir ansible botocore boto3
+
+# Pre-install Ansible AWS collection
 RUN ansible-galaxy collection install amazon.aws
+
 WORKDIR /app
 EOF
 
 echo "[+] Generating docker-compose.yml..."
 cat <<EOF > $PROJECT_NAME/docker-compose.yml
 services:
-  builder:
+  mq-builder:
     build: .
     volumes:
       - .:/app
@@ -23,10 +34,11 @@ services:
       - AWS_SECRET_ACCESS_KEY
       - AWS_SESSION_TOKEN
       - AWS_DEFAULT_REGION
+    # Runs init to fetch plugins, then builds using the var-file
     command: /bin/bash -c "packer init . && packer build -var-file=variables.pkrvars.hcl ."
 EOF
 
-echo "[+] Generating Packer Template with Tagging..."
+echo "[+] Generating Packer Template..."
 cat <<EOF > $PROJECT_NAME/template.pkr.hcl
 variable "aws_region"  { type = string }
 variable "mq_version"  { type = string default = "9.3" }
@@ -45,18 +57,12 @@ source "amazon-ebs" "ibm_mq" {
   instance_type = "t3.medium"
   region        = var.aws_region
   
-  # Tags applied to the resulting AMI
   tags = {
     Name         = "IBM-MQ-Golden-Image"
     Version      = var.mq_version
     Department   = var.dept
     CostCenter   = var.cost_center
-    ManagedBy    = "Packer-Ansible"
-  }
-
-  # Tags applied to the temporary instance used for building
-  run_tags = {
-    Name = "Packer-Builder-IBM-MQ"
+    ManagedBy    = "Packer-Ansible-UBI"
   }
 
   source_ami_filter {
@@ -88,15 +94,15 @@ dept        = "Middleware-Engineering"
 cost_center = "ACC-9988-XT"
 EOF
 
-echo "[+] Generating Ansible Role & Playbook..."
+echo "[+] Generating Ansible Role..."
 cat <<EOF > $PROJECT_NAME/roles/ibm_mq/tasks/main.yml
 ---
-- name: Install dependencies
+- name: Install MQ dependencies on Target
   dnf:
     name: [ksh, libstdc++, glibc, tar, procps-ng]
     state: present
 
-- name: Create mqm user/group
+- name: Create mqm user and group
   user: { name: mqm, group: mqm, home: /var/mqm, shell: /bin/bash }
 
 - name: Download MQ from S3
@@ -106,14 +112,24 @@ cat <<EOF > $PROJECT_NAME/roles/ibm_mq/tasks/main.yml
     dest: "/tmp/mq.tar.gz"
     mode: get
 
-- name: Install MQ
+- name: Extract and Install MQ
   shell: |
     tar -xzf /tmp/mq.tar.gz -C /tmp
+    # Finds the directory extracted from the tarball
     cd /tmp/MQServer
     ./mqlicense.sh -accept
     rpm -ivh MQSeriesRuntime*.rpm MQSeriesServer*.rpm
   args:
     creates: /opt/mqm/bin/dspmqver
+
+- name: Verify installation
+  command: /opt/mqm/bin/dspmqver
+  register: mq_ver
+  changed_when: false
+
+- name: Print MQ Version for Logs
+  debug:
+    msg: "Installed MQ Version: {{ mq_ver.stdout_lines[0] }}"
 
 - name: Final Cleanup
   file: { path: "{{ item }}", state: absent }
@@ -123,11 +139,10 @@ EOF
 echo "[+] Generating Ansible Vars..."
 cat <<EOF > $PROJECT_NAME/roles/ibm_mq/vars/main.yml
 ---
-s3_bucket: "YOUR_S3_BUCKET_NAME"
-mq_package_name: "IBM_MQ_LINUX_X86-64.tar.gz"
+s3_bucket: "REPLACE_WITH_YOUR_S3_BUCKET"
+mq_package_name: "IBM_MQ_9.3_LINUX_X86-64.tar.gz"
 EOF
 
 echo -e "---\n- hosts: all\n  become: yes\n  roles: [ibm_mq]" > $PROJECT_NAME/playbook.yml
 
-echo "Success! Navigate to $PROJECT_NAME, update the S3 bucket in roles/ibm_mq/vars/main.yml, and run: docker-compose up --build"
-
+echo "Done! Run: cd $PROJECT_NAME && docker-compose up --build"
