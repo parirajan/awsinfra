@@ -95,46 +95,104 @@ cost_center = "ACC-9988-XT"
 EOF
 
 echo "[+] Generating Ansible Role..."
-cat <<EOF > $PROJECT_NAME/roles/ibm_mq/tasks/main.yml
+cat <<EOF > $PROJECT_NAME/roles/ibm_mq/tasks/
+
 ---
-- name: Install MQ dependencies on Target
-  dnf:
-    name: [ksh, libstdc++, glibc, tar, procps-ng]
+- name: Check current FIPS status
+  ansible.builtin.command: fips-mode-setup --check
+  register: fips_status
+  changed_when: false
+  failed_when: false
+
+- name: Disable FIPS mode
+  ansible.builtin.command: fips-mode-setup --disable
+  when: "'is enabled' in fips_status.stdout"
+
+- name: Set IBM MQ No File Limits
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/30-ibm-mq.conf
+    content: |
+      # IBM MQ No File Limits
+      mqm       -       nofile      65536
+      root      -       nofile      65536
+    mode: '0644'
+
+- name: Install Dependencies and RHEL 9 Java (OpenJDK 21)
+  ansible.builtin.dnf:
+    name: 
+      - bash
+      - bc
+      - ca-certificates
+      - file
+      - findutils
+      - gawk
+      - glibc-common
+      - grep
+      - passwd
+      - procps-ng
+      - sed
+      - shadow-utils
+      - tar
+      - util-linux
+      - wget
+      - java-21-openjdk
     state: present
 
-- name: Create mqm user and group
-  user: { name: mqm, group: mqm, home: /var/mqm, shell: /bin/bash }
+- name: Create mqm group
+  ansible.builtin.group:
+    name: mqm
+    state: present
 
-- name: Download MQ from S3
-  amazon.aws.s3_object:
-    bucket: "{{ s3_bucket }}"
-    object: "{{ mq_package_name }}"
-    dest: "/tmp/mq.tar.gz"
-    mode: get
+- name: Create mqm user
+  ansible.builtin.user:
+    name: mqm
+    group: mqm
+    home: /var/mqm
+    shell: /bin/bash
 
-- name: Extract and Install MQ
-  shell: |
-    tar -xzf /tmp/mq.tar.gz -C /tmp
-    # Finds the directory extracted from the tarball
-    cd /tmp/MQServer
-    ./mqlicense.sh -accept
-    rpm -ivh MQSeriesRuntime*.rpm MQSeriesServer*.rpm
+- name: Download IBM MQ from Web
+  ansible.builtin.get_url:
+    url: "{{ mq_download_url }}"
+    dest: "/tmp/{{ mq_tarball_name }}"
+    mode: '0644'
+    timeout: 120
+
+- name: Extract IBM MQ
+  ansible.builtin.unarchive:
+    src: "/tmp/{{ mq_tarball_name }}"
+    dest: "/tmp"
+    remote_src: yes
+
+- name: Import PGP verification key
+  ansible.builtin.command: rpm --import ibm_mq_public.pgp
   args:
+    chdir: /tmp/MQServer
+
+- name: Accept License and Install MQ RPMs
+  ansible.builtin.shell: |
+    ./mqlicense.sh -text_only -accept
+    rpm -Uvh MQSeries*.rpm --nosignature --nodigest --force
+  args:
+    chdir: "/tmp/MQServer"
     creates: /opt/mqm/bin/dspmqver
 
 - name: Verify installation
-  command: /opt/mqm/bin/dspmqver
+  ansible.builtin.command: /opt/mqm/bin/dspmqver
   register: mq_ver
   changed_when: false
 
 - name: Print MQ Version for Logs
-  debug:
+  ansible.builtin.debug:
     msg: "Installed MQ Version: {{ mq_ver.stdout_lines[0] }}"
 
 - name: Final Cleanup
-  file: { path: "{{ item }}", state: absent }
-  loop: ["/tmp/mq.tar.gz", "/tmp/MQServer"]
-EOF
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: 
+    - "/tmp/{{ mq_tarball_name }}"
+    - "/tmp/MQServer"
+
 
 echo "[+] Generating Ansible Vars..."
 cat <<EOF > $PROJECT_NAME/roles/ibm_mq/vars/main.yml
